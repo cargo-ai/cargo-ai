@@ -330,6 +330,7 @@ mod generated_usage_custody_tests {
                 "lost response must preserve exact authenticated compressed bytes"
             );
             let (retry_request, _) = upload(&retry_body);
+            std::thread::sleep(Duration::from_secs(11));
             respond(&mut retry, acknowledgment(&retry_request));
             drop(retry);
             let mut policy = accept(&listener);
@@ -378,7 +379,9 @@ mod generated_usage_custody_tests {
         let before_ack = raw(&db);
         assert!(before_ack.len() > initial_raw.len());
         eprintln!("generated-usage-custody stage=retry-sync-started");
+        let acknowledged_upload_started = Instant::now();
         let first_result = cloud::sync_pass(None, true).await.unwrap();
+        assert!(acknowledged_upload_started.elapsed() >= Duration::from_secs(11));
         assert_eq!(first_result["outcome"], "fully_synced");
         assert_eq!(first_result["job"]["target_events"], initial_raw.len());
         let result = cloud::sync_pass(None, true).await.unwrap();

@@ -190,11 +190,21 @@ fn retry_reservations_survive_restart_and_fence_a_crashed_fourth_attempt() {
         .unwrap();
     for expected in 1..=4 {
         let now = now_ms();
+        let timeout = UPLOAD_REQUEST_TIMEOUT.as_millis() as i64;
         assert_eq!(
-            reserve_upload_attempt(&mut db, &lease, &job.id, &batch, now, 10_000).unwrap(),
+            reserve_upload_attempt(&mut db, &lease, &job.id, &batch, now, timeout).unwrap(),
             expected
         );
-        assert!(reserve_upload_attempt(&mut db, &lease, &job.id, &batch, now + 1, 10_000).is_err());
+        let due = job::active(&db, &source())
+            .unwrap()
+            .unwrap()
+            .retry_at_ms
+            .unwrap();
+        assert_eq!(due, now + timeout + if expected == 4 { 300_000 } else { 0 });
+        assert!(
+            reserve_upload_attempt(&mut db, &lease, &job.id, &batch, now + 29_999, timeout)
+                .is_err()
+        );
         if expected < 4 {
             pause_upload(
                 &mut db,
@@ -211,7 +221,7 @@ fn retry_reservations_survive_restart_and_fence_a_crashed_fourth_attempt() {
     }
     let restored = job::active(&db, &source()).unwrap().unwrap();
     assert_eq!(restored.retry_reason.as_deref(), Some("retry_cooldown"));
-    assert!(restored.retry_at_ms.unwrap() - now_ms() >= 309_000);
+    assert!(restored.retry_at_ms.unwrap() - now_ms() >= 329_000);
     let original = batch.request_json().to_owned();
     let due = restored.retry_at_ms.unwrap();
     // A new process may acquire a new lease after the old token expires.
@@ -219,7 +229,15 @@ fn retry_reservations_survive_restart_and_fence_a_crashed_fourth_attempt() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        reserve_upload_attempt(&mut db, &lease, &job.id, &batch, due, 10_000).unwrap(),
+        reserve_upload_attempt(
+            &mut db,
+            &lease,
+            &job.id,
+            &batch,
+            due,
+            UPLOAD_REQUEST_TIMEOUT.as_millis() as i64
+        )
+        .unwrap(),
         1
     );
     assert_eq!(

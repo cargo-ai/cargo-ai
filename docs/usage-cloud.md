@@ -58,7 +58,7 @@ Backlog batches target about 2,000,000 compressed bytes, stopping sooner at
 3,000,000 bytes; the authenticated account envelope is at most 4,500,000 bytes.
 The target is not a minimum: a backlog tail or one-second capture latency flushes
 a smaller batch. Existing event and line limits still apply. Each pass admits new
-work for at most 15 seconds; an admitted request retains its own 10-second
+work for at most 15 seconds; an admitted upload request retains its own 30-second
 lifetime, so completing a pass can take longer than 15 seconds.
 
 One sender lease per environment prevents overlapping sends. The running CLI's

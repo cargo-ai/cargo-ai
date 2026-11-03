@@ -47,6 +47,8 @@ const DEADLINE: Duration = Duration::from_secs(15);
 #[cfg(any(cargo_ai_cli, test))]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(any(cargo_ai_cli, test))]
+const UPLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(any(cargo_ai_cli, test))]
 const BATCH_FILL_LATENCY: Duration = Duration::from_secs(1);
 #[cfg(any(cargo_ai_cli, test))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -384,7 +386,7 @@ pub(crate) async fn sync_pass(history_days: Option<u32>, explicit: bool) -> Resu
             let quota=job.retry_reason.is_none() || job.retry_reason.as_deref()==Some("quota_paused");
             return Ok(json!({"schema_version":2,"outcome":if quota {"quota_paused"} else {"partial"},"reason":job.retry_reason.as_deref().unwrap_or("quota_paused"),"batches":0,"partial":true,"retry_at_ms":job.retry_at_ms,"reset_at_ms":if quota {job.retry_at_ms} else {None},"job":queue::job::progress(&db,&job)?}));
         }
-        let mut client=transport::V2Transport::new(REQUEST_TIMEOUT)?;
+        let mut client=transport::V2Transport::new(REQUEST_TIMEOUT)?.with_upload_timeout(UPLOAD_REQUEST_TIMEOUT);
         let status=client.call(&Request::Status{protocol_version:Version}).await?;
         supported(&status)?;
         if status["account_binding"]!=json!(selection.source.account_binding)
@@ -499,7 +501,7 @@ async fn sync_leased(
             &job.id,
             &batch,
             now_ms(),
-            REQUEST_TIMEOUT.as_millis() as i64
+            UPLOAD_REQUEST_TIMEOUT.as_millis() as i64
         ));
         batches += 1;
         let body = match client.upload_exact(batch.request_json()).await {

@@ -46,7 +46,15 @@ impl UploadFailure {
                     result["outcome"].as_str(),
                     Some("rate_limited" | "concurrency_limited")
                 ));
-        Self { retryable, retry_at_ms, invalid_payload, unknown:!invalid_payload, ..Self::from("Usage cloud operation was rejected; original history and pending payloads remain preserved") }
+        Self {
+            retryable,
+            retry_at_ms,
+            invalid_payload,
+            unknown: !invalid_payload,
+            ..Self::from(
+                "Usage cloud operation was rejected; original history and pending payloads remain preserved",
+            )
+        }
     }
 }
 fn retry_at(value: &Value, header: Option<i64>) -> Option<i64> {
@@ -82,6 +90,7 @@ pub(crate) struct V2Transport {
     refreshed: bool,
     check_credentials: bool,
     timeout: Duration,
+    upload_timeout: Duration,
 }
 impl V2Transport {
     pub(crate) fn new(timeout: Duration) -> Result<Self, String> {
@@ -119,7 +128,12 @@ impl V2Transport {
             refreshed: false,
             check_credentials,
             timeout,
+            upload_timeout: timeout,
         })
+    }
+    pub(crate) fn with_upload_timeout(mut self, timeout: Duration) -> Self {
+        self.upload_timeout = timeout;
+        self
     }
     fn unchanged(&self) -> Result<(), String> {
         if super::scheduler::canceled() {
@@ -135,24 +149,29 @@ impl V2Transport {
         }
         Ok(())
     }
-    async fn send_bytes(&self, body: String) -> Result<Value, UploadFailure> {
+    async fn send_bytes(
+        &self,
+        body: String,
+        timeout: Option<Duration>,
+    ) -> Result<Value, UploadFailure> {
         self.unchanged()?;
         if body.len() > MAX_ACCOUNT_BYTES {
             return Err("Usage cloud authenticated envelope exceeds its limit".into());
         }
-        let mut response = self
+        let mut request = self
             .client
             .post(&self.endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|_| {
-                UploadFailure::transient(
-                    "Usage cloud connection failed; submitted outcomes remain unknown",
-                    None,
-                )
-            })?;
+            .body(body);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        let mut response = request.send().await.map_err(|_| {
+            UploadFailure::transient(
+                "Usage cloud connection failed; submitted outcomes remain unknown",
+                None,
+            )
+        })?;
         let status = response.status();
         let header = response
             .headers()
@@ -184,7 +203,10 @@ impl V2Transport {
             status.as_u16() == 429 || status.as_u16() == 408 || status.is_server_error();
         let Some(mut result) = parsed.filter(Value::is_object) else {
             return Err(if transient {
-                UploadFailure::transient("Usage cloud service temporarily unavailable; submitted outcomes remain unknown",header)
+                UploadFailure::transient(
+                    "Usage cloud service temporarily unavailable; submitted outcomes remain unknown",
+                    header,
+                )
             } else {
                 "Usage cloud response is invalid".into()
             });
@@ -245,7 +267,11 @@ impl V2Transport {
         text: &str,
         replay_expired: bool,
     ) -> Result<Value, UploadFailure> {
-        let timeout = self.timeout;
+        let timeout = if replay_expired {
+            self.timeout
+        } else {
+            self.upload_timeout
+        };
         tokio::time::timeout(timeout,async {
             tokio::select! {
                 biased;
@@ -267,7 +293,12 @@ impl V2Transport {
             .map_err(|_| UploadFailure::from("Usage cloud request is invalid"))?;
         Self::consent(&request)?;
         self.unchanged()?;
-        let mut result = self.send_exact(text).await?;
+        let request_timeout = if replay_expired {
+            None
+        } else {
+            Some(self.upload_timeout)
+        };
+        let mut result = self.send_exact(text, request_timeout).await?;
         if result["type"] == "access_token_expired" && !self.refreshed {
             Self::consent(&request)?;
             self.unchanged()?;
@@ -278,7 +309,7 @@ impl V2Transport {
                 .as_deref()
                 .ok_or("Sign in explicitly to resume usage cloud")?;
             let body=json!({"action":"status","credentials":{"access_token":self.auth.access_token,"refresh_token":refresh},"session_policy":{"allow_refresh":true}}).to_string();
-            let refreshed = self.send_bytes(body).await?;
+            let refreshed = self.send_bytes(body, None).await?;
             if refreshed["status"] != "success" {
                 return Err("Usage cloud session refresh failed; sign in explicitly".into());
             }
@@ -295,7 +326,7 @@ impl V2Transport {
                     None,
                 ));
             }
-            result = self.send_exact(text).await?;
+            result = self.send_exact(text, request_timeout).await?;
         }
         let header = result["__transport_retry_at_ms"].as_i64();
         if result["status"] == "success" && result["type"] == "usage_analytics_succeeded" {
@@ -315,10 +346,14 @@ impl V2Transport {
         }
         Err(UploadFailure::rejected(&result, retry_at(&result, header)))
     }
-    async fn send_exact(&self, text: &str) -> Result<Value, UploadFailure> {
+    async fn send_exact(
+        &self,
+        text: &str,
+        timeout: Option<Duration>,
+    ) -> Result<Value, UploadFailure> {
         let credentials = serde_json::to_string(&json!({"access_token":self.auth.access_token}))
             .map_err(|_| "Cannot encode usage cloud credentials")?;
-        self.send_bytes(format!("{{\"action\":\"usage_analytics\",\"credentials\":{credentials},\"usage_analytics\":{text}}}")).await
+        self.send_bytes(format!("{{\"action\":\"usage_analytics\",\"credentials\":{credentials},\"usage_analytics\":{text}}}"), timeout).await
     }
     #[cfg(test)]
     fn test_at(endpoint: String) -> Self {
@@ -377,6 +412,63 @@ mod v2_tests {
         Request::Status {
             protocol_version: super::super::elastic::Version,
         }
+    }
+    #[tokio::test]
+    async fn upload_budget_overrides_client_default_without_extending_controls_or_refresh() {
+        let mut server = mockito::Server::new_async().await;
+        let delayed = server.mock("POST", "/account")
+            .with_body_from_request(|_| {
+                std::thread::sleep(Duration::from_millis(60));
+                json!({"status":"success","type":"usage_analytics_succeeded","usage_analytics":{"outcome":"accepted"}}).to_string().into_bytes()
+            }).expect(2).create_async().await;
+        let mut client = V2Transport::at(
+            crate::usage_backup::Auth {
+                access_token: "fixture-access".into(),
+                refresh_token: None,
+            },
+            Duration::from_millis(20),
+            format!("{}/account", server.url()),
+            false,
+        )
+        .unwrap()
+        .with_upload_timeout(Duration::from_millis(200));
+        let text = serde_json::to_string(&status()).unwrap();
+        assert_eq!(
+            client.upload_exact(&text).await.unwrap()["outcome"],
+            "accepted"
+        );
+        assert!(client.call(&status()).await.is_err());
+        delayed.assert_async().await;
+        delayed.remove_async().await;
+        let expired = server
+            .mock("POST", "/account")
+            .match_body(mockito::Matcher::PartialJson(
+                json!({"action":"usage_analytics"}),
+            ))
+            .with_body(json!({"type":"access_token_expired"}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+        let refresh = server
+            .mock("POST", "/account")
+            .match_body(mockito::Matcher::PartialJson(json!({"action":"status"})))
+            .with_body_from_request(|_| {
+                std::thread::sleep(Duration::from_millis(60));
+                json!({"status":"success","session":{"access_token":"new-token"}})
+                    .to_string()
+                    .into_bytes()
+            })
+            .expect(1)
+            .create_async()
+            .await;
+        client.auth.refresh_token = Some("fixture-refresh".into());
+        let started = std::time::Instant::now();
+        assert!(client.upload_exact(&text).await.is_err());
+        assert!(started.elapsed() < Duration::from_millis(180));
+        assert!(client.refreshed);
+        assert_eq!(client.auth.access_token, "fixture-access");
+        expired.assert_async().await;
+        refresh.assert_async().await;
     }
     #[tokio::test]
     async fn response_duplicate_fields_size_and_unknown_fail_without_retry() {

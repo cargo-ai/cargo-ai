@@ -956,20 +956,33 @@ async fn admitted_request_keeps_its_deadline_after_pass_budget() {
         .mock("POST", "/account")
         .match_body(matcher("upload"))
         .with_body_from_request(|request| {
-            std::thread::sleep(Duration::from_millis(250));
+            let db = open().unwrap();
+            let due: i64 = db
+                .query_row(
+                    "SELECT retry_at_ms FROM usage_cloud_upload_batches",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!((20_000..=30_000).contains(&(due - now_ms())));
+            std::thread::sleep(Duration::from_secs(11));
             response(ack(request.body().unwrap())).into_bytes()
         })
         .expect(1)
         .create_async()
         .await;
-    let mut transport = transport::V2Transport::new(REQUEST_TIMEOUT).unwrap();
+    let mut transport = transport::V2Transport::new(REQUEST_TIMEOUT)
+        .unwrap()
+        .with_upload_timeout(UPLOAD_REQUEST_TIMEOUT);
     let started = Instant::now() - DEADLINE + Duration::from_millis(100);
+    let request_started = Instant::now();
     let result = sync_leased(&mut db, &mut lease, &job, started, &mut transport)
         .await
         .unwrap();
     assert_eq!(result["uploaded_events"], 1);
     assert_eq!(result["outcome"], "fully_synced");
     assert_eq!(result["deadline_reached"], true);
+    assert!(request_started.elapsed() >= Duration::from_secs(11));
     upload.assert_async().await;
 }
 
