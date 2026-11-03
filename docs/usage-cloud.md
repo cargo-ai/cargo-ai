@@ -35,39 +35,74 @@ ineligible for cloud upload; they still have a finite local retention anchor.
 ## Enable and explicitly sync
 
 Local tracking and an explicitly enabled rolling policy are prerequisites for
-cloud consent. Enabling cloud analytics selects future records. Select existing
-local history separately when wanted:
+cloud consent. Enabling cloud analytics selects future activity and does not send
+it. Start or resume an explicit sync job:
 
 ```bash
 cargo ai usage cloud enable --json
-cargo ai usage cloud include-history --json
-cargo ai usage cloud include-history --through SEQUENCE \
-  --preview-hash SHA256 --confirm --json
 cargo ai usage cloud sync --json
+cargo ai usage cloud sync --include-history 30d --json
 ```
 
-Use the exact sequence and hash returned by the history-selection preview.
-Selection alone does not upload. Only explicit `usage cloud sync` sends new cloud
-analytics; execution and hourly maintenance do not send it automatically. A sync
-pass sends bounded sequential compressed batches, newest eligible events first,
-and reports partial progress. Each explicit sync first refreshes server policy and
-the Home's registration within the same 15-second budget. Local status reads its
-cached policy and reports pending events outside the cloud window separately.
-Repeat sync to continue retained gaps or interrupted
-work. Successful batches remain acknowledged across restart. Unknown attempts
-retain the same event identities and compressed request while locally retained;
-retries can produce transport duplicates that downstream processing deduplicates.
+`--include-history Nd` additionally selects available local history from the last
+N days. Basic permits 1–30 days; larger windows return `plan_limit_denied` before
+history selection or network access. Selection uses the job's start time and exact
+committed record identities. New arrivals wait for the next explicit job. Changing
+the requested window while a job remains active is rejected; plain `sync` resumes it.
+After disabling and enabling again, an explicit sync can renew that same target
+under the current consent. The passive runner cannot renew consent, and old
+ambiguous requests remain recorded.
 
-An upload acknowledgment means the service durably buffered the submitted batch.
-Rows may still fail processing, and the dimensional model may lag. The response
-does not certify that every event is query-ready. Expired-unsent and unknown
-coverage remain explicit.
+Backlog batches target about 2,000,000 compressed bytes, stopping sooner at
+4,096 events or 8,000,000 decoded bytes. The hard compressed bound is
+3,000,000 bytes; the authenticated account envelope is at most 4,500,000 bytes.
+The target is not a minimum: a backlog tail or one-second capture latency flushes
+a smaller batch. Existing event and line limits still apply. Each pass admits new
+work for at most 15 seconds; an admitted upload request retains its own 30-second
+lifetime, so completing a pass can take longer than 15 seconds.
 
-Basic cloud policy retains the most recent seven days and periodically trims the
-oldest canonical events toward one million unique events per account, shared
-across environments. This is a cleanup target with bounded overshoot. Upload rate
-and processing-freshness safeguards may pause admission. A 30-day local window
-does not extend the cloud window or cause expired cloud events to upload again.
+One sender lease per environment prevents overlapping sends. The running CLI's
+existing `run` operation maintenance scope can resume an unfinished explicit job
+when available; it does not create jobs or run a background daemon. Generated
+agents keep their existing local-maintenance-only boundary and do not send cloud
+analytics. A paused quota job waits until the recorded UTC reset before trying
+again. Successful acknowledgment progress and unknown requests survive restart.
+Retries preserve exact event and batch content and identities.
+
+Transient failures allow the initial upload plus at most three automatic retries,
+with full random delays of 0–1, 0–2 and 0–4 seconds. A longer server Retry-After
+wins. Retry timing and the physical attempt budget survive process restarts;
+a fourth unsuccessful upload pauses that batch for at least five minutes before
+a new cycle. An attempt slot is reserved before transmission, so a process crash
+can consume a local slot even if it interrupted the send. Credential renewal never adds an uncounted upload replay. An
+explicit invalid-payload rejection stops retries of that unchanged payload.
+Account or cloud-consent changes stop further sends. No global credential cache
+is introduced.
+
+Machine outcomes are `fully_synced`, `already_running`, `partial`, `quota_paused`,
+`plan_limit_denied`, `failed` and `outcome_unknown`. A transient pause uses an existing `partial` or `outcome_unknown` outcome and
+`reason:retry_backoff` or `reason:retry_cooldown`, with `retry_at_ms` naming the
+next eligible attempt. `reason:invalid_request` stops the unchanged payload.
+`reset_at_ms` is reserved for daily quota and is null for these transient pauses.
+The result and local status show
+the latest job identity, outcome, completion flag, fixed boundary, total, pending,
+uploaded, excluded and expired counts, including after completion. Server-expired
+identities remain separately counted and are excluded from later jobs for that
+account, including after a generation change. Independent local expiry can remove unsent records; those records are reported as
+expired and never counted as synced. A durable upload acknowledgment preserves
+local history and does not establish analytical query readiness.
+
+The account-wide daily allowance is 1,000,000,000 decoded bytes and 1,000 upload
+requests, shared across environments and reset at UTC midnight. Authenticated admitted attempts consume the request allowance, including invalid
+payloads; valid decoded bytes consume the byte allowance. Rate or concurrency
+rejections occur before that debit. Upload admission allows two requests per
+second with burst capacity four, at most one active upload per Home and three
+per account. Admitted retries
+consume allowance. Cloud payload retention is 30 days from first server arrival,
+with up to one million newest unique events per account after daily cleanup.
+Overshoot between cleanup runs is accepted. Explicit remote status reports
+`fresh`, `overdue`, `missing` or `failed` analytical refresh; the daily freshness goal
+is 24 hours. Uploads do not query analytical SQL.
 
 Basic permits three upload-enabled Homes. CLI and generated agents sharing a
 Home count once. To replace an active environment, use the opaque Home identifier
@@ -96,7 +131,7 @@ Use the exact preview values. If the confirmation response is lost, repeat that
 confirmation to reconcile its outcome. `usage cloud status --json` exposes the
 saved `pending_clear_confirmation` values after restart if the terminal result was
 lost. Clear fences the old cloud generation and
-leaves local history intact. Enable again and explicitly select history to replay
+leaves local history intact. Enable again and use `sync --include-history Nd` to replay
 retained local records into the new generation. Active-store removal, pending
 processing and provider recovery-copy expiry are separate; clear does not promise
 immediate physical erasure of every recovery copy. Local `usage delete` instead

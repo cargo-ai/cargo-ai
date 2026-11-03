@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod generated_usage_custody_tests {
     use crate::usage_analytics::{self as cloud, contract::*, elastic, queue};
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::collections::BTreeSet;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -64,7 +64,7 @@ mod generated_usage_custody_tests {
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
     }
     fn status(source: &Source, provenance: &Provenance) -> Value {
-        json!({"protocol_version":2,"capability":{"enabled":true,"supported_protocol_versions":[2]},"account_binding":source.account_binding,"data_generation":source.data_generation,"lifecycle_epoch":provenance.lifecycle_epoch,"environments":[{"source_home_id":source.source_home_id,"consent_interval":provenance.consent_interval}],"policy":{"retention_days":7,"retained_event_target":1_000_000,"max_active_environments":3},"processing_status":"not_observed"})
+        json!({"protocol_version":2,"capability":{"enabled":true,"supported_protocol_versions":[2]},"account_binding":source.account_binding,"data_generation":source.data_generation,"lifecycle_epoch":provenance.lifecycle_epoch,"environments":[{"source_home_id":source.source_home_id,"consent_interval":provenance.consent_interval}],"policy":{"retention_days":30,"retained_event_target":1_000_000,"max_active_environments":3},"processing_status":"not_observed"})
     }
     fn upload(body: &Value) -> (elastic::Request, Vec<EventSubmission>) {
         let request = body["usage_analytics"]
@@ -81,11 +81,9 @@ mod generated_usage_custody_tests {
             panic!("expected explicit V2 upload")
         };
         let events = elastic::decode_batch(batch).unwrap();
-        assert!(
-            events
-                .iter()
-                .all(|event| !event.original_text.contains("local only"))
-        );
+        assert!(events
+            .iter()
+            .all(|event| !event.original_text.contains("local only")));
         let members = events
             .iter()
             .map(|event| event.member().unwrap())
@@ -95,16 +93,18 @@ mod generated_usage_custody_tests {
             *ordered_membership_sha256
         );
         assert!(events.iter().any(|event| event.timing.is_some()) || events.len() == 1);
-        let hours = events
+        let occurrence_times = events
             .iter()
             .map(|event| {
                 serde_json::from_str::<Value>(&event.original_text).unwrap()["occurred_at_ms"]
                     .as_i64()
                     .unwrap()
-                    / 3_600_000
             })
             .collect::<Vec<_>>();
-        assert!(hours.windows(2).all(|pair| pair[0] >= pair[1]));
+        assert!(
+            occurrence_times.windows(2).all(|pair| pair[0] <= pair[1]),
+            "upload members must preserve oldest-first occurrence order"
+        );
         (request, events)
     }
     fn acknowledgment(request: &elastic::Request) -> Value {
@@ -259,7 +259,7 @@ mod generated_usage_custody_tests {
         db.execute(
             "INSERT INTO usage_meta(key,value) VALUES('usage_cloud_selected_v2',?1)",
             [
-                json!({"source":source,"provenance":provenance,"cloud_retention_days":7})
+                json!({"source":source,"provenance":provenance,"cloud_retention_days":30})
                     .to_string(),
             ],
         )
@@ -275,6 +275,9 @@ mod generated_usage_custody_tests {
         generated_timer_proof();
         eprintln!("generated-usage-custody stage=scheduler-proof-complete");
         assert_no_request(&observer);
+        for n in 1000..1512 {
+            late_event(&db, n, 1000);
+        }
         let initial_raw = raw(&db);
         assert!(initial_raw.len() >= 2);
         assert_eq!(cloud::local_status().unwrap()["uploaded"], 0);
@@ -300,6 +303,21 @@ mod generated_usage_custody_tests {
                 .map(|event| event.member().unwrap().event_id)
                 .collect::<BTreeSet<_>>();
             drop(first); // The durable outcome is unknown after an accepted request loses its response.
+            let mut automatic = accept(&listener);
+            let (automatic_text, automatic_body) = read_request(&mut automatic);
+            assert_eq!(
+                automatic_text, first_text,
+                "automatic retry must preserve exact authenticated bytes"
+            );
+            let (_, automatic_events) = upload(&automatic_body);
+            assert!(
+                automatic_events.len() > 100,
+                "backlog capture must fill beyond a single transaction"
+            );
+            // An invalid acknowledgment remains unknown and requires a later
+            // explicit reconciliation using the same immutable batch.
+            respond(&mut automatic, json!({}));
+            drop(automatic);
             let mut policy = accept(&listener);
             let (_, body) = read_request(&mut policy);
             assert_eq!(body["usage_analytics"]["command"], "status");
@@ -312,8 +330,14 @@ mod generated_usage_custody_tests {
                 "lost response must preserve exact authenticated compressed bytes"
             );
             let (retry_request, _) = upload(&retry_body);
+            std::thread::sleep(Duration::from_secs(11));
             respond(&mut retry, acknowledgment(&retry_request));
             drop(retry);
+            let mut policy = accept(&listener);
+            let (_, body) = read_request(&mut policy);
+            assert_eq!(body["usage_analytics"]["command"], "status");
+            respond(&mut policy, status(&server_source, &server_provenance));
+            drop(policy);
             let mut next = accept(&listener);
             let (_, next_body) = read_request(&mut next);
             let (next_request, next_events) = upload(&next_body);
@@ -330,7 +354,14 @@ mod generated_usage_custody_tests {
             (first_ids.len(), next_ids.len())
         });
         eprintln!("generated-usage-custody stage=first-sync-started");
-        assert!(cloud::sync().await.is_err());
+        assert_eq!(
+            {
+                let result = cloud::sync_pass(None, true).await.unwrap();
+                assert_eq!(result["batches"], 2);
+                result["outcome"].clone()
+            },
+            "outcome_unknown"
+        );
         eprintln!("generated-usage-custody stage=first-sync-complete");
         assert_eq!(raw(&db), initial_raw);
         assert_eq!(cloud::local_status().unwrap()["pending"], initial_raw.len());
@@ -343,16 +374,23 @@ mod generated_usage_custody_tests {
             )
             .unwrap();
         assert!(frozen.parse::<elastic::Request>().is_ok());
-        cloud::scheduler::scope(record_run()).await;
+        record_run().await;
         late_event(&db, 100, 3_600_000);
         let before_ack = raw(&db);
         assert!(before_ack.len() > initial_raw.len());
         eprintln!("generated-usage-custody stage=retry-sync-started");
-        let result = cloud::sync().await.unwrap();
+        let acknowledged_upload_started = Instant::now();
+        let first_result = cloud::sync_pass(None, true).await.unwrap();
+        assert!(acknowledged_upload_started.elapsed() >= Duration::from_secs(11));
+        assert_eq!(first_result["outcome"], "fully_synced");
+        assert_eq!(first_result["job"]["target_events"], initial_raw.len());
+        let result = cloud::sync_pass(None, true).await.unwrap();
+        assert_eq!(result["outcome"], "fully_synced");
         eprintln!("generated-usage-custody stage=retry-sync-complete");
         let (first_count, next_count) = server.join().unwrap();
         eprintln!("generated-usage-custody stage=server-joined");
-        assert_eq!(result["acknowledged_events"], first_count + next_count);
+        assert_eq!(first_result["acknowledged_events"], first_count);
+        assert_eq!(result["acknowledged_events"], next_count);
         assert_eq!(result["processing_status"], "not_observed");
         assert_eq!(cloud::local_status().unwrap()["uploaded"], before_ack.len());
         assert_eq!(cloud::local_status().unwrap()["pending"], 0);
@@ -374,7 +412,13 @@ mod generated_usage_custody_tests {
         assert_no_request(&observer);
 
         late_event(&db, 101, 0);
-        queue::capture(&mut db, &source, cloud::project).unwrap();
+        let now = cloud::now_ms();
+        let lease = queue::acquire_lease(&mut db, &source, now, queue::MAX_LEASE_MS)
+            .unwrap()
+            .unwrap();
+        let job = queue::job::start(&mut db, &lease, now, None).unwrap();
+        queue::job::capture(&mut db, &lease, &job, now).unwrap();
+        queue::release_lease(&mut db, &lease, now).unwrap();
         assert_eq!(cloud::local_status().unwrap()["pending"], 1);
         let expired =
             crate::usage_store::retention::apply(cloud::now_ms() + 8 * 86_400_000).unwrap();
@@ -396,7 +440,7 @@ mod generated_usage_custody_tests {
         assert_no_request(&observer);
         eprintln!("generated-usage-custody stage=retention-complete");
         eprintln!(
-            "Generated explicit V2 upload: exact lost-response replay, {} acknowledged events, open-hour/earlier-hour gaps, raw ACK preservation, unsent rolling expiry, and real scheduler wake/cancel passed",
+            "Generated explicit V2 upload: filled backlog, bounded automatic retry and exact lost-response replay, {} acknowledged events, open-hour/earlier-hour gaps, raw ACK preservation, unsent rolling expiry, and real scheduler wake/cancel passed",
             before_ack.len()
         );
     }

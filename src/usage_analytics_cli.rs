@@ -3,6 +3,12 @@ use crate::usage_analytics::{self as cloud, contract::*};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde::Serialize;
 use serde_json::{json, Value};
+fn parse_history_days(text: &str) -> Result<u32, String> {
+    text.strip_suffix('d')
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|days| *days > 0)
+        .ok_or_else(|| "Use a positive day window, for example 30d".into())
+}
 fn json_flag(command: Command) -> Command {
     command.arg(Arg::new("json").long("json").action(ArgAction::SetTrue))
 }
@@ -22,23 +28,14 @@ pub(crate) fn cloud_command() -> Command {
             ),
         ))
         .subcommand(json_flag(Command::new("disable")))
-        .subcommand(json_flag(Command::new("sync").about(
-            "Upload bounded newest-first batches with a 15-second budget",
-        )))
         .subcommand(json_flag(
-            Command::new("include-history")
-                .about("Preview older history; confirmation selects without uploading")
+            Command::new("sync")
+                .about("Resume a fixed oldest-first sync job in a bounded pass")
                 .arg(
-                    Arg::new("through")
-                        .long("through")
-                        .value_parser(clap::value_parser!(i64).range(0..)),
-                )
-                .arg(Arg::new("preview-hash").long("preview-hash"))
-                .arg(
-                    Arg::new("confirm")
-                        .long("confirm")
-                        .action(ArgAction::SetTrue)
-                        .requires_all(["through", "preview-hash"]),
+                    Arg::new("include-history")
+                        .long("include-history")
+                        .value_name("Nd")
+                        .value_parser(parse_history_days),
                 ),
         ))
         .subcommand(json_flag(
@@ -53,26 +50,6 @@ pub(crate) fn cloud_command() -> Command {
                         .long("confirm")
                         .action(ArgAction::SetTrue)
                         .requires_all(["preview-id", "preview-hash"]),
-                ),
-        ))
-        .subcommand(json_flag(
-            Command::new("history")
-                .arg(
-                    Arg::new("after-sequence")
-                        .long("after-sequence")
-                        .value_parser(clap::value_parser!(u64).range(1..=i64::MAX as u64))
-                        .requires("through-sequence"),
-                )
-                .arg(
-                    Arg::new("through-sequence")
-                        .long("through-sequence")
-                        .value_parser(clap::value_parser!(u64).range(0..=i64::MAX as u64)),
-                )
-                .arg(
-                    Arg::new("limit")
-                        .long("limit")
-                        .default_value("100")
-                        .value_parser(clap::value_parser!(u16).range(1..=100)),
                 ),
         ))
 }
@@ -145,13 +122,13 @@ fn selection(args: &ArgMatches) -> Result<(&str, &str, &ArgMatches), String> {
 fn mutates(kind: &str, command: &str, leaf: &ArgMatches) -> bool {
     match (kind, command) {
         ("cloud", "enable" | "disable" | "sync") | ("retention", "configure") => true,
-        ("cloud", "clear" | "include-history") => leaf.get_flag("confirm"),
+        ("cloud", "clear") => leaf.get_flag("confirm"),
         _ => false,
     }
 }
 fn requires_remote(kind: &str, command: &str, leaf: &ArgMatches) -> bool {
     kind == "cloud"
-        && (matches!(command, "enable" | "disable" | "sync" | "clear" | "history")
+        && (matches!(command, "enable" | "disable" | "sync" | "clear")
             || command == "status" && leaf.get_flag("remote"))
 }
 async fn execute(args: &ArgMatches) -> Result<Value, String> {
@@ -171,19 +148,9 @@ async fn execute(args: &ArgMatches) -> Result<Value, String> {
             .await?
         }
         ("cloud", "disable") => cloud::disable().await?,
-        ("cloud", "sync") => cloud::sync().await?,
-        ("cloud", "include-history") => cloud::history_selection(
-            leaf.get_one::<i64>("through").copied(),
-            if leaf.get_flag("confirm") {
-                Some(
-                    leaf.get_one::<String>("preview-hash")
-                        .ok_or("Preview hash missing")?
-                        .as_str(),
-                )
-            } else {
-                None
-            },
-        )?,
+        ("cloud", "sync") => {
+            cloud::sync_with_history(leaf.get_one::<u32>("include-history").copied()).await?
+        }
         ("cloud", "clear") => {
             let preview = if leaf.get_flag("confirm") {
                 Some((
@@ -205,14 +172,6 @@ async fn execute(args: &ArgMatches) -> Result<Value, String> {
             };
             cloud::clear(preview).await?
         }
-        ("cloud", "history") => {
-            cloud::history(
-                leaf.get_one::<u64>("after-sequence").copied(),
-                leaf.get_one::<u64>("through-sequence").copied(),
-                *leaf.get_one::<u16>("limit").unwrap(),
-            )
-            .await?
-        }
         ("retention", "status") => crate::usage_store::retention::status(cloud::now_ms())?,
         ("retention", "preview") => crate::usage_store::retention::preview(cloud::now_ms())?,
         ("retention", "configure") => {
@@ -232,7 +191,8 @@ async fn execute(args: &ArgMatches) -> Result<Value, String> {
     let local_read_only_sync = kind == "cloud"
         && command == "sync"
         && (result["enabled"] == false
-            || result["busy"] == true && result["policy_refreshed"] != true);
+            || result["outcome"] == "already_running"
+            || result["outcome"] == "plan_limit_denied");
     let remote_effect = if !remote {
         Effect::Unapplied
     } else if inactive_sync {
@@ -248,12 +208,17 @@ async fn execute(args: &ArgMatches) -> Result<Value, String> {
     } else {
         Effect::ReadOnly
     };
-    let postconditions_verified = result["partial"] != true;
+    let postconditions_verified =
+        result["partial"] != true && (command != "sync" || result["outcome"] == "fully_synced");
     serde_json::to_value(Payload {
         schema_version: 2,
         operation: format!("usage {kind} {command}"),
+        local: if result["outcome"] == "plan_limit_denied" {
+            cloud::empty_local_status()
+        } else {
+            cloud::local_status()?
+        },
         result,
-        local: cloud::local_status()?,
         effects: Effects {
             local: if mutates(kind, command, leaf) && !local_read_only_sync {
                 Effect::Applied

@@ -47,6 +47,10 @@ const DEADLINE: Duration = Duration::from_secs(15);
 #[cfg(any(cargo_ai_cli, test))]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(any(cargo_ai_cli, test))]
+const UPLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(any(cargo_ai_cli, test))]
+const BATCH_FILL_LATENCY: Duration = Duration::from_secs(1);
+#[cfg(any(cargo_ai_cli, test))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Selection {
@@ -54,7 +58,7 @@ pub(crate) struct Selection {
     pub(crate) provenance: Provenance,
     pub(crate) cloud_retention_days: u32,
 }
-#[cfg(any(cargo_ai_cli, test))]
+#[cfg(cargo_ai_cli)]
 fn cloud_days(body: &Value) -> Result<u32, String> {
     body["policy"]["retention_days"]
         .as_u64()
@@ -139,8 +143,12 @@ fn rolling_enabled(db: &Connection) -> Result<bool, String> {
         && policy.unselected_loss_acknowledged)
 }
 #[cfg(any(cargo_ai_cli, test))]
+pub(crate) fn empty_local_status() -> Value {
+    json!({"schema_version":2,"enabled":false,"cleared":false,"clear_outcome_unknown":false,"pending_clear_confirmation":null,"source":null,"provenance":null,"pending":0,"quarantined":0,"uploaded":0,"origin_unverified":0,"time_ineligible":0,"cloud_window_ineligible":0,"cloud_retention_days":null,"unscanned":0,"unknown_batches":0,"expired_without_acknowledgment_total":0,"retention_requires_exact_receipt":false,"processing_status":"not_observed","full_local_restoration_from_cloud":false,"sync_job":null,"server_expired_events":0})
+}
+#[cfg(any(cargo_ai_cli, test))]
 pub(crate) fn local_status() -> Result<Value, String> {
-    let mut value = json!({"schema_version":2,"enabled":false,"cleared":false,"clear_outcome_unknown":false,"pending_clear_confirmation":null,"source":null,"provenance":null,"pending":0,"quarantined":0,"uploaded":0,"origin_unverified":0,"time_ineligible":0,"cloud_window_ineligible":0,"cloud_retention_days":null,"unscanned":0,"unknown_batches":0,"expired_without_acknowledgment_total":0,"retention_requires_exact_receipt":false,"processing_status":"not_observed","full_local_restoration_from_cloud":false});
+    let mut value = empty_local_status();
     let Some(db) = crate::usage_store::open_database(false)? else {
         return Ok(value);
     };
@@ -158,6 +166,12 @@ pub(crate) fn local_status() -> Result<Value, String> {
         return Ok(value);
     };
     let status = queue::status(&db, &selection.source)?;
+    if let Some(job) = queue::job::latest(&db, &selection.source)? {
+        let mut progress = queue::job::progress(&db, &job)?;
+        progress["retry_at_ms"] = json!(job.retry_at_ms);
+        value["sync_job"] = progress;
+    }
+    value["server_expired_events"] = json!(queue::job::terminal_count(&db, &selection.source)?);
     value["enabled"] =
         json!(status.enabled && rolling_enabled(&db)? && crate::usage_store::tracking_enabled()?);
     value["cleared"] = json!(status.cleared);
@@ -176,11 +190,6 @@ pub(crate) fn local_status() -> Result<Value, String> {
     value["cloud_retention_days"] = json!(selection.cloud_retention_days);
     value["provenance"] = json!(selection.provenance);
     value["pending"] = json!(status.pending);
-    value["cloud_window_ineligible"] = json!(queue::cloud_window_ineligible(
-        &db,
-        &selection.source,
-        cloud_cutoff(&selection, now_ms())?
-    )?);
     value["quarantined"] = json!(status.quarantined);
     value["uploaded"] = json!(status.retained);
     value["origin_unverified"] = json!(status.origin_unverified);
@@ -206,11 +215,32 @@ fn supported(body: &Value) -> Result<(), String> {
 #[cfg(cargo_ai_cli)]
 #[cfg(any(cargo_ai_cli, test))]
 pub(crate) async fn remote_status() -> Result<Value, String> {
-    transport::V2Transport::new(REQUEST_TIMEOUT)?
+    let mut client = transport::V2Transport::new(REQUEST_TIMEOUT)?;
+    let mut status = client
         .call(&Request::Status {
             protocol_version: Version,
         })
-        .await
+        .await?;
+    let freshness = client
+        .call(&Request::Freshness {
+            protocol_version: Version,
+        })
+        .await?;
+    if freshness["protocol_version"] != 2
+        || !matches!(
+            freshness["refresh_status"].as_str(),
+            Some("fresh" | "overdue" | "missing" | "failed")
+        )
+        || freshness["target_age_ms"] != 86_400_000
+        || !(freshness["last_refresh_ms"].is_null()
+            || freshness["last_refresh_ms"]
+                .as_i64()
+                .is_some_and(|value| value >= 0))
+    {
+        return Err("Usage cloud freshness status is invalid".into());
+    }
+    status["freshness"] = freshness;
+    Ok(status)
 }
 #[cfg(cargo_ai_cli)]
 #[cfg(any(cargo_ai_cli, test))]
@@ -279,48 +309,8 @@ pub(crate) async fn disable() -> Result<Value, String> {
         json!({"schema_version":2,"enabled":false,"history_deleted":false,"pending_preserved":true,"remote":body,"local":local_status()?}),
     )
 }
-#[cfg(cargo_ai_cli)]
 #[cfg(any(cargo_ai_cli, test))]
-fn preview_hash(selection: &Selection, through: i64) -> Result<Sha256Hash, String> {
-    canonical_hash("cargo-ai-usage-history-selection-v2", &(selection, through)).map_err(encode)
-}
-#[cfg(cargo_ai_cli)]
-#[cfg(any(cargo_ai_cli, test))]
-pub(crate) fn history_selection(
-    through: Option<i64>,
-    confirmation: Option<&str>,
-) -> Result<Value, String> {
-    let selection = selected()?.ok_or("Enable usage cloud explicitly before selecting history")?;
-    let Some(db) = crate::usage_store::open_database(false)? else {
-        return Err("Usage history unavailable".into());
-    };
-    let high = queue::high(&db)?;
-    let through = through.unwrap_or(high);
-    if through < 0 || through > high {
-        return Err("Historical snapshot is invalid".into());
-    }
-    let hash = preview_hash(&selection, through)?;
-    drop(db);
-    if let Some(confirmation) = confirmation {
-        if hash.as_str() != confirmation {
-            return Err(
-                "Historical selection preview no longer matches the current source and permission"
-                    .into(),
-            );
-        }
-        queue::select_history(
-            &mut open()?,
-            &selection.source,
-            &selection.provenance,
-            through,
-        )?;
-    }
-    Ok(
-        json!({"schema_version":2,"source":selection.source,"provenance":selection.provenance,"through_sequence":through.to_string(),"preview_sha256":hash,"selected":confirmation.is_some(),"upload_started":false,"restored_origin_unverified_records_remain_blocked":true}),
-    )
-}
-#[cfg(any(cargo_ai_cli, test))]
-fn build_upload(
+pub(crate) fn build_upload(
     source: &Source,
     provenance: &Provenance,
     id: &CanonicalUuid,
@@ -349,201 +339,341 @@ fn build_upload(
     }
     Ok((text, count, membership))
 }
-#[cfg(any(cargo_ai_cli, test))]
+#[cfg(all(test, cargo_ai_cli))]
 pub(crate) async fn sync() -> Result<Value, String> {
+    sync_with_history(None).await
+}
+#[cfg(cargo_ai_cli)]
+pub(crate) async fn sync_with_history(history_days: Option<u32>) -> Result<Value, String> {
+    sync_pass(history_days, true).await
+}
+#[cfg(any(cargo_ai_cli, test))]
+pub(crate) async fn sync_pass(history_days: Option<u32>, explicit: bool) -> Result<Value, String> {
+    // Deny unsupported plans before opening history or loading credentials.
+    if history_days.is_some_and(|days| days == 0 || days > 30) {
+        return Ok(
+            json!({"schema_version":2,"outcome":"plan_limit_denied","maximum_history_days":30,"requested_history_days":history_days,"batches":0,"partial":false}),
+        );
+    }
     let started = Instant::now();
-    let Some(mut selection) = selected()? else {
-        return local_status();
+    let Some(selection) = selected()? else {
+        return Ok(
+            json!({"schema_version":2,"outcome":"failed","reason":"cloud_disabled","batches":0,"partial":false}),
+        );
     };
     if local_status()?["enabled"] != true {
-        return local_status();
+        return Ok(
+            json!({"schema_version":2,"outcome":"failed","reason":"cloud_disabled","batches":0,"partial":false}),
+        );
     }
     let maintenance = crate::usage_store::retention::apply(now_ms())?;
     if maintenance["maintenance_pending"] == true {
         return Ok(
-            json!({"schema_version":2,"batches":0,"upload_paused":true,"maintenance_pending":true,"local":local_status()?}),
+            json!({"schema_version":2,"outcome":"partial","reason":"maintenance_pending","batches":0,"partial":true}),
         );
-    }
-    let remaining = DEADLINE
-        .saturating_sub(started.elapsed())
-        .min(REQUEST_TIMEOUT);
-    if remaining.is_zero() {
-        return Err("Usage sync deadline elapsed before policy refresh".into());
-    }
-    let mut policy_client = transport::V2Transport::new(remaining)?;
-    let status = tokio::time::timeout(
-        DEADLINE.saturating_sub(started.elapsed()),
-        policy_client.call(&Request::Status {
-            protocol_version: Version,
-        }),
-    )
-    .await
-    .map_err(|_| "Usage sync deadline elapsed during policy refresh")??;
-    supported(&status)?;
-    if status["account_binding"] != json!(selection.source.account_binding)
-        || status["data_generation"].as_u64() != Some(selection.source.data_generation.get())
-        || status["lifecycle_epoch"].as_u64() != Some(selection.provenance.lifecycle_epoch.get())
-    {
-        return Err("Usage cloud account or generation changed; explicitly enable the current source before uploading".into());
-    }
-    let registered = status["environments"]
-        .as_array()
-        .is_some_and(|environments| {
-            environments.iter().any(|environment| {
-                environment["source_home_id"] == json!(selection.source.source_home_id)
-                    && environment["consent_interval"].as_u64()
-                        == Some(selection.provenance.consent_interval.get())
-            })
-        });
-    let current = selected()?.ok_or("Usage cloud consent changed during policy refresh")?;
-    if current.source != selection.source
-        || current.provenance != selection.provenance
-        || local_status()?["enabled"] != true
-    {
-        return Err("Usage cloud consent changed during policy refresh".into());
     }
     let mut db = open()?;
-    if !registered {
-        queue::disable(&mut db, &selection.source)?;
-        return Err(
-            "Usage cloud environment is no longer upload-enabled; pending local history preserved"
-                .into(),
-        );
-    }
-    selection.cloud_retention_days = cloud_days(&status)?;
-    db.execute(
-        "UPDATE usage_meta SET value=?2 WHERE key=?1",
-        params![SELECTED, serde_json::to_string(&selection).map_err(encode)?],
-    )
-    .map_err(db_error)?;
-    let cutoff_ms = cloud_cutoff(&selection, now_ms())?;
-    queue::retire_uploads_before(&mut db, &selection.source, cutoff_ms, now_ms())?;
-    let Some(lease) =
+    let Some(mut lease) =
         queue::acquire_lease(&mut db, &selection.source, now_ms(), queue::MAX_LEASE_MS)?
     else {
         return Ok(
-            json!({"schema_version":2,"busy":true,"batches":0,"policy_refreshed":true,"local":local_status()?}),
+            json!({"schema_version":2,"outcome":"already_running","batches":0,"partial":false}),
         );
     };
-    let result = sync_leased(&mut db, &lease, cutoff_ms, started).await;
+    let result=async {
+        let job=if explicit {queue::job::start(&mut db,&lease,now_ms(),history_days)?} else {queue::job::resume(&mut db,&lease,now_ms())?};
+        if job.retry_reason.as_deref()==Some("invalid_request") || job.retry_at_ms.is_some_and(|retry|retry>now_ms()) {
+            let quota=job.retry_reason.is_none() || job.retry_reason.as_deref()==Some("quota_paused");
+            return Ok(json!({"schema_version":2,"outcome":if quota {"quota_paused"} else {"partial"},"reason":job.retry_reason.as_deref().unwrap_or("quota_paused"),"batches":0,"partial":true,"retry_at_ms":job.retry_at_ms,"reset_at_ms":if quota {job.retry_at_ms} else {None},"job":queue::job::progress(&db,&job)?}));
+        }
+        let mut client=transport::V2Transport::new(REQUEST_TIMEOUT)?.with_upload_timeout(UPLOAD_REQUEST_TIMEOUT);
+        let status=client.call(&Request::Status{protocol_version:Version}).await?;
+        supported(&status)?;
+        if status["account_binding"]!=json!(selection.source.account_binding)
+            || status["data_generation"].as_u64()!=Some(selection.source.data_generation.get())
+            || status["lifecycle_epoch"].as_u64()!=Some(selection.provenance.lifecycle_epoch.get()) {
+            return Err("Usage cloud authority changed; pending job preserved".into());
+        }
+        let registered=status["environments"].as_array().is_some_and(|environments|environments.iter().any(|environment|environment["source_home_id"]==json!(selection.source.source_home_id)&&environment["consent_interval"].as_u64()==Some(selection.provenance.consent_interval.get())));
+        if !registered {return Err("Usage cloud environment is no longer enabled; pending job preserved".into());}
+        sync_leased(&mut db,&mut lease,&job,started,&mut client).await
+    }.await;
     let _ = queue::release_lease(&mut db, &lease, now_ms());
-    result
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => Ok(
+            json!({"schema_version":2,"outcome":"failed","reason":error,"batches":0,"partial":true}),
+        ),
+    }
 }
-#[cfg(test)]
 #[cfg(any(cargo_ai_cli, test))]
-fn insufficient_payload_budget(elapsed: Duration) -> bool {
-    DEADLINE.saturating_sub(elapsed) < REQUEST_TIMEOUT
+pub(crate) async fn resume_active() {
+    let active = selected().ok().flatten().and_then(|selection| {
+        open()
+            .ok()
+            .and_then(|db| queue::job::active(&db, &selection.source).ok().flatten())
+    });
+    if active.is_some() {
+        let _ = sync_pass(None, false).await;
+    }
 }
 #[cfg(any(cargo_ai_cli, test))]
 async fn sync_leased(
     db: &mut Connection,
-    lease: &queue::Lease,
-    cutoff_ms: i64,
+    lease: &mut queue::Lease,
+    job: &queue::job::Job,
     started: Instant,
+    client: &mut transport::V2Transport,
 ) -> Result<Value, String> {
     let mut batches = 0usize;
-    let mut acknowledged = 0usize;
     let mut uploaded = 0usize;
-    let mut expired_ack = 0usize;
-    let mut canceled = false;
-    let mut stopped_error: Option<String> = None;
-    loop {
-        if scheduler::canceled() {
-            canceled = true;
-            break;
-        }
-        if started.elapsed() >= DEADLINE {
-            break;
-        }
-        // Each capture commits at most 100 examined rows, including persisted
-        // exclusions for invalid clocks and unverified origins.
-        let capture_started = Instant::now();
-        let capture_budget =
-            (DEADLINE.saturating_sub(started.elapsed()) / 3).min(Duration::from_secs(5));
-        while capture_started.elapsed() < capture_budget && started.elapsed() < DEADLINE {
-            if scheduler::canceled() {
-                break;
-            }
-            if queue::capture_progress(db, lease.source(), project)?.examined == 0 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        if scheduler::canceled() {
-            canceled = true;
-            break;
-        }
-        let remaining = DEADLINE
-            .saturating_sub(started.elapsed())
-            .min(REQUEST_TIMEOUT);
-        if remaining.is_zero() {
-            break;
-        }
-        let Some(batch) =
-            queue::prepare_upload_batch_since(db, lease, now_ms(), cutoff_ms, build_upload)?
-        else {
-            break;
-        };
-        let request = batch.request_json().parse::<Request>().map_err(encode)?;
-        if !matches!(&request, Request::Upload { ordered_membership_sha256, source, provenance, batch_id, .. } if ordered_membership_sha256 == batch.membership() && source == batch.source() && provenance == batch.provenance() && batch_id == batch.id())
-        {
-            return Err(
-                "Saved usage upload changed exact batch authority; pending batch preserved".into(),
-            );
-        }
-        queue::begin_upload_attempt(db, lease, batch.id(), now_ms())?;
-        let remaining = DEADLINE
-            .saturating_sub(started.elapsed())
-            .min(REQUEST_TIMEOUT);
-        if remaining.is_zero() {
-            break;
-        }
-        let mut client = transport::V2Transport::new(remaining)?;
-        batches += 1;
-        let response = tokio::time::timeout(
-            DEADLINE.saturating_sub(started.elapsed()),
-            client.call_exact(batch.request_json()),
-        )
-        .await
-        .map_err(|_| "Usage sync deadline elapsed; submitted outcomes remain unknown".to_owned())
-        .and_then(|result| result);
-        let body = match response {
-            Ok(body) => body,
-            Err(error) => {
-                if acknowledged == 0 {
-                    return Err(error);
+    let mut acknowledged = 0usize;
+    let mut outcome = "partial";
+    let mut error = None;
+    let mut retry_at = None;
+    let mut reason = None;
+    let mut quota = None;
+    macro_rules! local_step {
+        ($label:lifetime, $work:expr) => {
+            match $work {
+                Ok(value) => value,
+                Err(failure) => {
+                    outcome = if batches > 0 { "partial" } else { "failed" };
+                    error = Some(failure);
+                    break $label;
                 }
-                stopped_error = Some(error);
+            }
+        };
+    }
+    'passes: while started.elapsed() < DEADLINE && !scheduler::canceled() {
+        local_step!('passes, queue::renew_lease(db, lease, now_ms()));
+        // Short capture transactions fill one bounded candidate pool. A tail or
+        // latency trigger is flushable without a minimum compressed batch size.
+        let fill_started = Instant::now();
+        let mut captured = 0;
+        while local_step!('passes, queue::job::captured_pending(db, job))
+            < elastic::MAX_BATCH_EVENTS
+        {
+            let count = local_step!('passes, queue::job::capture(db, lease, job, now_ms()));
+            captured += count;
+            if count == 0
+                || fill_started.elapsed() >= BATCH_FILL_LATENCY
+                || started.elapsed() >= DEADLINE
+                || scheduler::canceled()
+            {
+                break;
+            }
+        }
+        if started.elapsed() >= DEADLINE || scheduler::canceled() {
+            break;
+        }
+        let Some(batch) = local_step!('passes, queue::prepare_job_upload(
+            db,
+            lease,
+            now_ms(),
+            &job.id,
+            build_upload
+        )) else {
+            let progress = local_step!('passes, queue::job::progress(db, job));
+            if progress["pending_events"] == 0 {
+                outcome = if progress["expired_events"] == 0 && progress["excluded_events"] == 0 {
+                    "fully_synced"
+                } else {
+                    "partial"
+                };
+            } else if captured > 0 {
+                continue;
+            }
+            break;
+        };
+        let request = local_step!('passes, batch.request_json().parse::<Request>().map_err(encode));
+        if !matches!(&request,Request::Upload{ordered_membership_sha256,source,provenance,batch_id,..} if ordered_membership_sha256==batch.membership()&&source==batch.source()&&provenance==batch.provenance()&&batch_id==batch.id())
+        {
+            outcome = "outcome_unknown";
+            error = Some("Saved usage batch authority changed; job preserved".into());
+            break;
+        }
+        // The pass budget admits work; it does not shorten an admitted request.
+        local_step!('passes,client.check_upload(batch.request_json()));
+        let attempt = local_step!('passes, queue::reserve_upload_attempt(
+            db,
+            lease,
+            &job.id,
+            &batch,
+            now_ms(),
+            UPLOAD_REQUEST_TIMEOUT.as_millis() as i64
+        ));
+        batches += 1;
+        let body = match client.upload_exact(batch.request_json()).await {
+            Ok(body) => body,
+            Err(failure) => {
+                outcome = if failure.unknown {
+                    "outcome_unknown"
+                } else {
+                    "partial"
+                };
+                error = Some(failure.message);
+                if failure.invalid_payload {
+                    reason = Some("invalid_request");
+                } else if failure.retryable || attempt >= 4 {
+                    let cooldown = attempt >= 4;
+                    reason = Some(if cooldown {
+                        "retry_cooldown"
+                    } else {
+                        "retry_backoff"
+                    });
+                    let delay = if cooldown {
+                        300_000
+                    } else {
+                        retry_delay_ms(attempt)
+                    };
+                    retry_at = Some(
+                        now_ms()
+                            .saturating_add(delay)
+                            .max(failure.retry_at_ms.unwrap_or(0)),
+                    );
+                }
+                local_step!('passes, queue::pause_upload(
+                    db,
+                    lease,
+                    &job.id,
+                    &batch,
+                    retry_at,
+                    reason.unwrap_or("outcome_unknown"),
+                    outcome,
+                    now_ms()
+                ));
+                if failure.retryable && attempt < 4 {
+                    let delay = Duration::from_millis(
+                        retry_at.unwrap().saturating_sub(now_ms()).max(0) as u64,
+                    );
+                    if delay < DEADLINE.saturating_sub(started.elapsed()) && !scheduler::canceled()
+                    {
+                        let until = tokio::time::Instant::now() + delay;
+                        while tokio::time::Instant::now() < until && !scheduler::canceled() {
+                            tokio::time::sleep(
+                                (until - tokio::time::Instant::now())
+                                    .min(Duration::from_millis(25)),
+                            )
+                            .await;
+                        }
+                        if scheduler::canceled() {
+                            break;
+                        }
+                        retry_at = None;
+                        reason = None;
+                        error = None;
+                        continue;
+                    }
+                }
                 break;
             }
         };
-        let verified = serde_json::from_value::<elastic::UploadAck>(body)
-            .map_err(|_| "Usage upload acknowledgment is invalid; exact pending batch preserved".to_owned())
-            .and_then(|ack| ack.verify(&request).map_err(|_| "Usage upload acknowledgment changed exact batch authority; pending batch preserved".to_owned()));
-        if let Err(error) = verified {
-            if acknowledged == 0 {
-                return Err(error);
+        if attempt < 4 {
+            // A received response ends the in-flight reservation. Its content
+            // must still establish an exact acknowledgment or explicit pause.
+            local_step!('passes,queue::pause_upload(db,lease,&job.id,&batch,None,"outcome_unknown","outcome_unknown",now_ms()));
+        }
+        if body["protocol_version"] == 2 && body["outcome"] == "quota_paused" {
+            let retry = body["retry_at_ms"]
+                .as_i64()
+                .filter(|retry| *retry > now_ms() && *retry % 86_400_000 == 0);
+            if retry.is_none()
+                || body["reset_at_ms"].as_i64() != retry
+                || body["daily_bytes_limit"].as_u64().is_none()
+                || body["daily_request_limit"].as_u64().is_none()
+            {
+                outcome = "outcome_unknown";
+                error = Some("Invalid quota pause response; exact batch preserved".into());
+                break;
             }
-            stopped_error = Some(error);
+            outcome = "quota_paused";
+            retry_at = retry;
+            reason = Some("quota_paused");
+            local_step!('passes, queue::pause_upload(
+                db,
+                lease,
+                &job.id,
+                &batch,
+                retry_at,
+                "quota_paused",
+                outcome,
+                now_ms()
+            ));
+            quota = Some(body);
+            break;
+        }
+        if body["protocol_version"] == 2 && body["outcome"] == "expired" {
+            let expired = serde_json::from_value::<Vec<String>>(body["expired_event_ids"].clone())
+                .map_err(|_| "Invalid expiry membership".to_owned())
+                .and_then(|ids| {
+                    queue::job::expire_batch_members(db, lease, job, &batch, &ids, now_ms())
+                });
+            if let Err(failure) = expired {
+                outcome = "outcome_unknown";
+                error = Some(failure);
+                break;
+            }
+            continue;
+        }
+        let verified = serde_json::from_value::<elastic::UploadAck>(body)
+            .map_err(|_| "Invalid acknowledgment; exact batch preserved".to_owned())
+            .and_then(|ack| {
+                ack.verify(&request)
+                    .map_err(|_| "Acknowledgment authority mismatch; exact batch preserved".into())
+            });
+        if let Err(failure) = verified {
+            outcome = "outcome_unknown";
+            error = Some(failure);
             break;
         }
         acknowledged += batch.members().len();
-        match queue::acknowledge_uploaded(db, lease, batch.id(), now_ms()) {
-            Ok(()) => uploaded += batch.members().len(),
-            Err(error) if error.contains("after its local batch expired") => {
-                expired_ack += batch.members().len();
-                break;
-            }
-            Err(error) => {
-                stopped_error = Some(error);
-                break;
-            }
+        if let Err(failure) = queue::acknowledge_uploaded(db, lease, batch.id(), now_ms()) {
+            outcome = "outcome_unknown";
+            error = Some(failure);
+            break;
         }
+        uploaded += batch.members().len();
         tokio::task::yield_now().await;
     }
-    Ok(
-        json!({"schema_version":2,"batches":batches,"policy_refreshed":true,"acknowledged_events":acknowledged,"uploaded_events":uploaded,"acknowledged_after_expiry_events":expired_ack,"processing_status":"not_observed","canceled":canceled,"deadline_reached":started.elapsed() >= DEADLINE,"partial":canceled || stopped_error.is_some() || started.elapsed() >= DEADLINE,"stopped_error":stopped_error,"local":local_status()?}),
-    )
+    if error.is_some() && retry_at.is_none() && reason.is_none() {
+        if let Ok(Some(saved)) = queue::job::active(db, lease.source()) {
+            if saved.retry_reason.as_deref() == Some("retry_cooldown") {
+                retry_at = saved.retry_at_ms;
+                reason = Some("retry_cooldown");
+            }
+        }
+    }
+    let observed = queue::job::progress(db, job).ok();
+    if error.is_none()
+        && outcome == "partial"
+        && observed.as_ref().is_some_and(|progress| {
+            progress["pending_events"] == 0
+                && progress["expired_events"] == 0
+                && progress["excluded_events"] == 0
+        })
+    {
+        outcome = "fully_synced";
+    }
+    let progress = match queue::job::finish_pass(db, job, retry_at, reason, outcome) {
+        Ok(progress) => Some(progress),
+        Err(failure) => {
+            outcome = if batches > 0 { "partial" } else { "failed" };
+            error = Some(failure);
+            observed
+        }
+    };
+    let mut result = json!({"schema_version":2,"outcome":outcome,"batches":batches,"policy_refreshed":true,"uploaded_events":uploaded,"acknowledged_events":acknowledged,"processing_status":"not_observed","partial":outcome!="fully_synced","canceled":scheduler::canceled(),"deadline_reached":started.elapsed()>=DEADLINE,"stopped_error":error,"reason":reason,"retry_at_ms":retry_at,"reset_at_ms":if outcome=="quota_paused" {retry_at} else {None},"quota":quota,"job":progress});
+    if reason.is_none() {
+        result.as_object_mut().unwrap().remove("reason");
+    }
+    Ok(result)
+}
+#[cfg(any(cargo_ai_cli, test))]
+fn retry_delay_ms(attempt: u32) -> i64 {
+    let ceiling = 1000u64 << attempt.saturating_sub(1).min(2);
+    let random = uuid::Uuid::new_v4().as_u128() as u64;
+    (random % (ceiling + 1)) as i64
 }
 #[cfg(cargo_ai_cli)]
 #[cfg(any(cargo_ai_cli, test))]
@@ -591,77 +721,5 @@ pub(crate) async fn clear(preview: Option<(CanonicalUuid, Sha256Hash)>) -> Resul
     {
         return Err("Clear preview is invalid; local state preserved".into());
     }
-    Ok(body)
-}
-#[cfg(cargo_ai_cli)]
-#[cfg(any(cargo_ai_cli, test))]
-pub(crate) async fn history(
-    after: Option<u64>,
-    through: Option<u64>,
-    limit: u16,
-) -> Result<Value, String> {
-    if !(1..=100).contains(&limit) || after.is_some() && through.is_none() {
-        return Err("History pagination requires the captured through-sequence boundary".into());
-    }
-    let selection = selected()?.ok_or("Usage cloud source is missing")?;
-    let mut body = transport::V2Transport::new(REQUEST_TIMEOUT)?
-        .call(&Request::History {
-            protocol_version: Version,
-            source: selection.source.clone(),
-            after_sequence: after,
-            limit,
-        })
-        .await?;
-    let source: Source = serde_json::from_value(body["source"].clone())
-        .map_err(|_| "Usage cloud history omitted its source")?;
-    let high = body["high_watermark"]
-        .as_u64()
-        .filter(|n| *n <= i64::MAX as u64)
-        .ok_or("Usage cloud history omitted its bounded snapshot")?;
-    let events = body["events"]
-        .as_array()
-        .ok_or("Usage cloud history omitted its bounded events")?;
-    if source != selection.source
-        || body["protocol_version"] != 2
-        || events.len() > usize::from(limit)
-        || through.is_some_and(|bound| high < bound)
-    {
-        return Err("Usage cloud history returned mismatched scope or snapshot bounds".into());
-    }
-    let bound = through.unwrap_or(high);
-    let mut previous = after.unwrap_or(0);
-    let mut ids = std::collections::BTreeSet::new();
-    for event in events {
-        let sequence = event["sequence"]
-            .as_u64()
-            .filter(|n| *n > previous && *n <= high)
-            .ok_or("Usage cloud history returned unordered members")?;
-        let mut record = event.clone();
-        let object = record
-            .as_object_mut()
-            .ok_or("Usage cloud history event is invalid")?;
-        object.remove("sequence");
-        let event_id = object
-            .remove("event_id")
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .ok_or("Usage cloud history identity is missing")?;
-        let submission: EventSubmission = serde_json::from_value(record)
-            .map_err(|_| "Usage cloud history event fields are invalid")?;
-        if submission.member().map_err(encode)?.event_id != event_id || !ids.insert(event_id) {
-            return Err("Usage cloud history contains conflicting identities".into());
-        }
-        previous = sequence;
-    }
-    body["events"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|event| event["sequence"].as_u64().is_some_and(|n| n <= bound));
-    let last = body["events"]
-        .as_array()
-        .unwrap()
-        .last()
-        .and_then(|event| event["sequence"].as_u64());
-    body["next_sequence"] = json!(last.filter(|n| *n < bound));
-    body["through_sequence"] = json!(bound);
     Ok(body)
 }

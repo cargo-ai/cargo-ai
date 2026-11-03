@@ -25,6 +25,8 @@ async fn pass() {
     }
     if !canceled() {
         let _ = crate::usage_store::retention::apply(super::now_ms());
+        #[cfg(any(cargo_ai_cli, test))]
+        super::resume_active().await;
     }
 }
 /// Dropping the operation aborts its worker immediately; Drop never waits or

@@ -2281,9 +2281,9 @@ fn generated_usage_custody_case(fixture: &Fixture) {
     for file in [
         "src/usage_analytics.rs",
         "src/usage_analytics/contract.rs",
-        "src/usage_analytics/custody.rs",
         "src/usage_analytics/events.rs",
         "src/usage_analytics/elastic.rs",
+        "src/usage_analytics/sync_job.rs",
         "src/usage_analytics/queue.rs",
         "src/usage_analytics/local_queue.rs",
         "src/usage_analytics/transport.rs",

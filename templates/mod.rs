@@ -65,13 +65,35 @@ const CREDENTIALS_STORE_RS_NAME: &str = "src/credentials/store.rs";
 const CREDENTIALS_STORE_RS_TEMPLATE: &str = include_str!("src/credentials/store.rs");
 
 /// Template files emitted into a newly scaffolded agent workspace.
-pub const TEMPLATES: [(&str, &str); 28] = [
-    ("src/usage_analytics.rs", include_str!("src/usage_analytics.rs")),
-    ("src/usage_analytics/contract.rs", include_str!("src/usage_analytics/contract.rs")),
-    ("src/usage_analytics/queue.rs", include_str!("src/usage_analytics/queue.rs")),
-    ("src/usage_analytics/transport.rs", include_str!("src/usage_analytics/transport.rs")),
-    ("src/usage_analytics/scheduler.rs", include_str!("src/usage_analytics/scheduler.rs")),
-    ("src/usage_analytics/tests.rs", include_str!("src/usage_analytics/tests.rs")),
+pub const TEMPLATES: [(&str, &str); 39] = [
+    (
+        "src/usage_analytics.rs",
+        include_str!("src/usage_analytics.rs"),
+    ),
+    (
+        "src/usage_analytics/contract.rs",
+        include_str!("src/usage_analytics/contract.rs"),
+    ),
+    (
+        "src/usage_analytics/sync_job.rs",
+        include_str!("src/usage_analytics/sync_job.rs"),
+    ),
+    (
+        "src/usage_analytics/queue.rs",
+        include_str!("src/usage_analytics/queue.rs"),
+    ),
+    (
+        "src/usage_analytics/transport.rs",
+        include_str!("src/usage_analytics/transport.rs"),
+    ),
+    (
+        "src/usage_analytics/scheduler.rs",
+        include_str!("src/usage_analytics/scheduler.rs"),
+    ),
+    (
+        "src/usage_analytics/tests.rs",
+        include_str!("src/usage_analytics/tests.rs"),
+    ),
     ("src/usage_backup.rs", include_str!("src/usage_backup.rs")),
     (
         "src/usage_backup_host.rs",
@@ -101,7 +123,10 @@ pub const TEMPLATES: [(&str, &str); 28] = [
     (ARGS_RS_NAME, ARGS_RS_TEMPLATE),
     (USAGE_LOG_RS_NAME, USAGE_LOG_RS_TEMPLATE),
     ("src/usage_store.rs", include_str!("../src/usage_store.rs")),
-    ("src/usage_store/retention.rs", include_str!("../src/usage_store/retention.rs")),
+    (
+        "src/usage_store/retention.rs",
+        include_str!("../src/usage_store/retention.rs"),
+    ),
     (
         "src/usage_store/codec.rs",
         include_str!("../src/usage_store/codec.rs"),

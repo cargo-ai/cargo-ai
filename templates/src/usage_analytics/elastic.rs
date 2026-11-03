@@ -49,6 +49,9 @@ pub enum Request {
     Status {
         protocol_version: Version,
     },
+    Freshness {
+        protocol_version: Version,
+    },
     Enable {
         protocol_version: Version,
         source_home_id: CanonicalUuid,
@@ -81,12 +84,6 @@ pub enum Request {
         preview_id: CanonicalUuid,
         preview_sha256: Sha256Hash,
     },
-    History {
-        protocol_version: Version,
-        source: Source,
-        after_sequence: Option<u64>,
-        limit: u16,
-    },
 }
 impl FromStr for Request {
     type Err = ContractError;
@@ -113,9 +110,7 @@ impl Request {
             {
                 return Err(ContractError::BoundsExceeded);
             }
-            Self::History { limit, .. } if *limit == 0 || *limit > 100 => {
-                return Err(ContractError::BoundsExceeded);
-            }
+
             _ => {}
         }
         Ok(())

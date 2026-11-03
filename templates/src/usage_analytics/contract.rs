@@ -1,9 +1,4 @@
-//! Shared event contract, with historical custody fixtures available to tests.
+//! Shared event identity and validation contract.
 #[path = "events.rs"]
 mod events;
 pub use events::*;
-#[cfg(test)]
-#[path = "custody.rs"]
-mod custody;
-#[cfg(test)]
-pub use custody::*;

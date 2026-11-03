@@ -278,7 +278,7 @@ fn machine_schema_preserves_shared_timing_and_counter_boundaries() {
 }
 
 #[test]
-fn machine_history_event_ids_match_shared_membership_identity() {
+fn machine_event_ids_match_shared_membership_identity() {
     use crate::usage_analytics::contract::EventSubmission;
     let root = schema();
     let uuid = "abcdef01-2345-4000-8000-000000000001";
@@ -305,5 +305,37 @@ fn machine_history_event_ids_match_shared_membership_identity() {
         );
         assert_eq!(member_valid, expected, "shared membership: {event_id}");
         assert_eq!(schema_valid, member_valid, "schema identity: {event_id}");
+    }
+}
+
+#[test]
+fn sync_schema_has_closed_actual_outcomes() {
+    for outcome in [
+        "fully_synced",
+        "already_running",
+        "partial",
+        "quota_paused",
+        "plan_limit_denied",
+        "failed",
+        "outcome_unknown",
+    ] {
+        let payload = serde_json::json!({"schema_version":2,"operation":"usage cloud sync","result":{"schema_version":2,"outcome":outcome,"batches":0,"partial":false},"local":crate::usage_analytics::empty_local_status(),"effects":{"local":"read_only","remote":"unapplied"},"postconditions_verified":false});
+        assert_valid(&payload);
+        let mut unknown = payload;
+        unknown["result"]["outcome"] = serde_json::json!("accepted");
+        let schema = schema();
+        assert!(!matches(&unknown, &schema, &schema));
+    }
+}
+
+#[test]
+fn sync_retry_pauses_preserve_the_existing_closed_payload() {
+    for (reason, outcome, retry) in [
+        ("retry_backoff", "outcome_unknown", Some(1000)),
+        ("retry_cooldown", "partial", Some(300_000)),
+        ("invalid_request", "partial", None),
+    ] {
+        let value = serde_json::json!({"schema_version":2,"operation":"usage cloud sync","result":{"schema_version":2,"outcome":outcome,"reason":reason,"batches":0,"partial":true,"retry_at_ms":retry,"reset_at_ms":null},"local":crate::usage_analytics::empty_local_status(),"effects":{"local":"read_only","remote":"unapplied"},"postconditions_verified":false});
+        assert_valid(&value);
     }
 }
