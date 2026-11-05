@@ -920,7 +920,16 @@ mod tests {
     fn native_resolution_uses_production_evidence_and_exact_context_without_state_writes() {
         let fixture = Fixture::new();
         let before = fixture.snapshot();
-        let resolution = fixture.resolve().unwrap();
+        // Keep the positive assertion inside the reviewed evidence interval.
+        let resolve = || {
+            resolve_with_home(
+                &fixture.root,
+                &fixture.request,
+                &fixture.home,
+                1_791_331_200,
+            )
+        };
+        let resolution = resolve().unwrap();
         assert!(resolution.ready);
         assert!(!resolution.execution_authorized);
         assert_eq!(resolution.invocation_access, "unverified");
@@ -947,7 +956,7 @@ mod tests {
         );
         assert_eq!(details["invocation_access"], "unverified");
         assert_eq!(details["evidence"][0]["reviewed_at"], "2026-10-06");
-        assert_eq!(resolution.identity, fixture.resolve().unwrap().identity);
+        assert_eq!(resolution.identity, resolve().unwrap().identity);
         assert_eq!(before, fixture.snapshot());
         let encoded = serde_json::to_string(&resolution).unwrap();
         assert!(!encoded.contains("synthetic-role-secret"));

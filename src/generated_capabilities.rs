@@ -7,6 +7,10 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
+#[cfg(cargo_ai_cli)]
+#[path = "commands/client_actions/measurement.rs"]
+pub(crate) mod measurement;
+
 #[path = "generated_capabilities/record.rs"]
 mod record;
 use record::{encoded_record, CLI_IDENTITY, CLOSE, IDENTITY, OPEN, RECORD_LEN, REVISION};
@@ -233,12 +237,10 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
 pub fn capabilities_for_artifact(
     artifact: &Path,
 ) -> Result<RuntimeCapabilities, CapabilityReadError> {
-    #[cfg(feature = "preparation-metrics")]
-    let _span = crate::commands::client_actions::measurement::span(
-        crate::commands::client_actions::measurement::Stage::ChildCapabilityScan,
-    );
-    #[cfg(feature = "preparation-metrics")]
-    crate::commands::client_actions::measurement::read_attempt();
+    #[cfg(cargo_ai_cli)]
+    let _span = measurement::span(measurement::Stage::ChildCapabilityScan);
+    #[cfg(cargo_ai_cli)]
+    measurement::read_attempt();
     let metadata = std::fs::metadata(artifact)
         .map_err(|error| CapabilityReadError::Unreadable(error.kind()))?;
     if !metadata.is_file() {
@@ -249,19 +251,17 @@ pub fn capabilities_for_artifact(
     }
     let file =
         File::open(artifact).map_err(|error| CapabilityReadError::Unreadable(error.kind()))?;
-    #[cfg(feature = "preparation-metrics")]
-    crate::commands::client_actions::measurement::file_opened();
+    #[cfg(cargo_ai_cli)]
+    measurement::file_opened();
     capabilities_from_reader(file, MAX_ARTIFACT_BYTES)
 }
 
 /// Passive bounded source identity lookup; never executes an artifact's inspect command.
 pub fn definition_for_artifact(artifact: &Path) -> Result<String, CapabilityReadError> {
-    #[cfg(feature = "preparation-metrics")]
-    let _span = crate::commands::client_actions::measurement::span(
-        crate::commands::client_actions::measurement::Stage::ChildDefinitionScan,
-    );
-    #[cfg(feature = "preparation-metrics")]
-    crate::commands::client_actions::measurement::read_attempt();
+    #[cfg(cargo_ai_cli)]
+    let _span = measurement::span(measurement::Stage::ChildDefinitionScan);
+    #[cfg(cargo_ai_cli)]
+    measurement::read_attempt();
     let metadata =
         std::fs::metadata(artifact).map_err(|e| CapabilityReadError::Unreadable(e.kind()))?;
     if !metadata.is_file() {
@@ -271,8 +271,8 @@ pub fn definition_for_artifact(artifact: &Path) -> Result<String, CapabilityRead
         return Err(CapabilityReadError::Oversized);
     }
     let mut file = File::open(artifact).map_err(|e| CapabilityReadError::Unreadable(e.kind()))?;
-    #[cfg(feature = "preparation-metrics")]
-    crate::commands::client_actions::measurement::file_opened();
+    #[cfg(cargo_ai_cli)]
+    measurement::file_opened();
     let mut window = Vec::new();
     let mut block = [0u8; READ_BLOCK_SIZE];
     let mut total = 0;
@@ -284,8 +284,8 @@ pub fn definition_for_artifact(artifact: &Path) -> Result<String, CapabilityRead
         if count == 0 {
             break;
         }
-        #[cfg(feature = "preparation-metrics")]
-        crate::commands::client_actions::measurement::read_bytes(count);
+        #[cfg(cargo_ai_cli)]
+        measurement::read_bytes(count);
         total += count as u64;
         if total > MAX_ARTIFACT_BYTES {
             return Err(CapabilityReadError::Oversized);
@@ -340,8 +340,8 @@ fn capabilities_from_reader(
         if count == 0 {
             break;
         }
-        #[cfg(feature = "preparation-metrics")]
-        crate::commands::client_actions::measurement::read_bytes(count);
+        #[cfg(cargo_ai_cli)]
+        measurement::read_bytes(count);
         total += count as u64;
         if total > limit {
             return Err(CapabilityReadError::Oversized);

@@ -8,7 +8,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub(crate) mod measurement;
+pub(crate) use crate::generated_capabilities::measurement;
 use measurement::Stage;
 
 pub(crate) const CATALOG_FILE: &str = "cargo-ai-actions.json";
