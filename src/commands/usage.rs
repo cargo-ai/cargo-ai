@@ -568,6 +568,48 @@ mod contract_tests {
         usage_store::insert_event(&db,&json!({"schema_version":1,"event_id":id,"root_run_id":root,"agent_run_id":root,"event_type":"provider_request_completed","timestamp":"2026-09-22T00:00:00Z","provider":{"server":"typesafe","requested_model":"jev","resolved_model":"jev-1"},"status":"success","usage":{"input_tokens":value,"output_tokens":0,"total_tokens":value}})).unwrap();
     }
     #[test]
+    fn v2_passive_queries_preserve_populated_v1_store() {
+        let _home = Home::new();
+        let directory = usage_store::directory();
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("usage.sqlite3");
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE usage_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT UNIQUE NOT NULL, root_run_id TEXT, agent_run_id TEXT,
+                event_type TEXT NOT NULL, created_at TEXT NOT NULL, record_json TEXT NOT NULL);
+             CREATE TABLE usage_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             PRAGMA user_version=1;",
+        )
+        .unwrap();
+        let event = json!({
+            "schema_version": 1,
+            "event_id": "legacy-event",
+            "root_run_id": "legacy-root",
+            "agent_run_id": "legacy-root",
+            "event_type": "root_run_completed",
+            "timestamp": "2026-09-22T00:00:00Z",
+            "status": "success"
+        });
+        db.execute(
+            "INSERT INTO usage_events(event_id,root_run_id,agent_run_id,event_type,created_at,record_json)
+             VALUES('legacy-event','legacy-root','legacy-root','root_run_completed','2026-09-22T00:00:00Z',?1)",
+            [event.to_string()],
+        )
+        .unwrap();
+        drop(db);
+        let original = std::fs::read(&path).unwrap();
+
+        let summary = query(&["summary", "--json", "--schema-version", "2"]);
+        assert_eq!(summary["summary"]["root_run_count"], 1);
+        let runs = query(&["runs", "--json", "--schema-version", "2"]);
+        assert_eq!(runs["runs"][0]["root_run_id"], "legacy-root");
+        let show = query(&["show", "legacy-root", "--json", "--schema-version", "2"]);
+        assert_eq!(show["events"][0], event);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
     fn machine_contract_usage_preserves_v1_v2_domain_payloads_and_tracking_independence() {
         let _home = Home::new();
         record("fixture-event", "fixture-root", 7);

@@ -26,6 +26,7 @@ opt-level = 3
 [features]
 default = ["developer-tools"]
 developer-tools = []
+preparation-metrics = []
 
 [dependencies]
 zstd = { version = "=0.14.3", default-features = false }
