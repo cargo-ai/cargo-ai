@@ -795,10 +795,13 @@ pub fn canonical_identity<T: Serialize>(value: &T) -> Result<String, RoleError> 
         }
     }
     let value = normalized(serde_json::to_value(value).map_err(|_| invalid())?);
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&value).map_err(|_| invalid())?)
-    ))
+    let bytes = serde_json::to_vec(&value).map_err(|_| invalid())?;
+    #[cfg(cargo_ai_cli)]
+    {
+        #[cfg(feature = "preparation-metrics")]
+        crate::commands::client_actions::measurement::hashed(bytes.len());
+    }
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 #[cfg(any(cargo_ai_cli, test))]
 fn satisfies(requirements: &OperationRequirements, settings: &BTreeMap<String, Value>) -> bool {

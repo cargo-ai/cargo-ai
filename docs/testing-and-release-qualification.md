@@ -376,3 +376,12 @@ rate limited** warning; completed earlier cases remain partial evidence and the
 journey is not a live pass. Missing, malformed or inconsistent evidence and failed
 capability/history assertions block qualification. Direct test invocations remain
 strict even when a workflow's supplemental rate-limit policy permits a warning.
+
+
+## Preparation diagnostics
+
+Developer builds can enable the `preparation-metrics` feature to inspect existing action preparation work. With that feature compiled, `CARGO_AI_PREPARATION_METRICS=1` emits one diagnostic JSON report to stderr for passive `actions list` or `actions resolve`. Ordinary machine stdout retains its existing envelope. Labels are fixed and reports omit paths and content.
+
+The report counts measured catalog loads, reads, hash bytes and checks. Stage invocation counts include nested spans of the same kind. Read/hash counters belong to the innermost span. Inclusive times overlap, while exclusive times subtract nested work. Installed-package and profile internals have outer timings only. Match any timing conclusion to the exact build, fixture, cache conditions and enabled collector overhead.
+
+Focused feature tests use `cargo test --features preparation-metrics --bin cargo-ai preparation_metrics`. Add the native `--target` required by your environment. The ignored `preparation_metrics_bounded_real_metadata_samples` test measures actual preparation on synthetic files and prints eight samples with `-- --ignored --nocapture`. It performs passive metadata work. The optional `CARGO_AI_PREPARATION_FIXTURE_DIR` must name a new private directory and retains the synthetic fixture for separate command measurements. Diagnostic reports are development evidence and do not extend the application payload contract.

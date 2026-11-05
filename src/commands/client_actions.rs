@@ -8,6 +8,9 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+pub(crate) mod measurement;
+use measurement::Stage;
+
 pub(crate) const CATALOG_FILE: &str = "cargo-ai-actions.json";
 const MAX_CATALOG_BYTES: usize = 256 * 1024;
 const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
@@ -237,6 +240,8 @@ pub(crate) fn load_target(
     project: Option<&Path>,
     package: Option<&str>,
 ) -> Result<ActionTarget, ActionError> {
+    let _span = measurement::span(Stage::LoadTarget);
+    let _authority = measurement::span(Stage::InstalledAuthorityLease);
     match (project, package) {
         (Some(root), None) => {
             let metadata = fs::symlink_metadata(root)
@@ -454,6 +459,7 @@ pub(crate) fn machine_run(matches: &clap::ArgMatches) -> Result<Value, super::ma
     let (command, args) = matches.subcommand().ok_or_else(|| {
         super::machine::Failure::new("cli.invalid_input", "Missing actions command.")
     })?;
+    let _metrics = measurement::Session::from_env(command);
     let target = load_target(
         args.get_one::<String>("project").map(Path::new),
         args.get_one::<String>("package").map(String::as_str),
@@ -596,6 +602,7 @@ pub(crate) fn limits() -> Value {
     json!({"catalog_bytes":MAX_CATALOG_BYTES,"actions":256,"interfaces":64,"resources":64,"request_bytes":MAX_REQUEST_BYTES,"business_depth":MAX_DEPTH,"array_items":1024,"object_members":MAX_MEMBERS,"resource_bytes":MAX_RESOURCE_BYTES,"inventory_bytes":MAX_INVENTORY_BYTES,"definition_bytes":MAX_DEFINITION_BYTES,"attachment_bytes":MAX_ATTACHMENT_BYTES,"string_bytes":64*1024,"business_key_bytes":128,"result_bytes":65536,"producer_payload_bytes":131072,"artifact":{"read_types":super::action_artifacts::SUPPORTED_TYPES,"file_bytes":super::action_artifacts::MAX_ARTIFACT_BYTES,"request_bytes":super::action_artifacts::MAX_REQUEST_BYTES,"nominations":64,"format_chunks":4096,"json_depth":32,"json_nodes":65536,"response_bytes":8*1024*1024,"native_confinement":cfg!(any(target_os="linux",target_os="macos",windows)),"authorization":"trusted_host_grant"}})
 }
 pub(crate) fn discover(root: &Path) -> Result<ActionCatalog, ActionError> {
+    let _span = measurement::span(Stage::Discover);
     let loaded = load_catalog(root)?;
     let actions = loaded
         .document
@@ -696,6 +703,7 @@ pub(crate) fn parse_request(raw: &str) -> Result<ActionRequest, ActionError> {
     Ok(request)
 }
 pub(crate) fn prepare(root: &Path, request: &ActionRequest) -> Result<PreparedAction, ActionError> {
+    let _span = measurement::span(Stage::Prepare);
     if ![2, 3, 4].contains(&request.schema_version) {
         return Err(ActionError::new(
             "action.unsupported_contract",
@@ -1059,6 +1067,8 @@ pub(crate) fn resource(
 }
 
 fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
+    let _span = measurement::span(Stage::LoadCatalog);
+    let authority = measurement::span(Stage::InstalledAuthorityLease);
     let metadata = fs::symlink_metadata(root).map_err(|e| e.to_string())?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err("Action root must be a real directory.".into());
@@ -1085,6 +1095,7 @@ fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
             "Installed catalog is not a selected asset",
         ));
     }
+    drop(authority);
     let catalog = confined_file(&root, CATALOG_FILE)?;
     let bytes = read_bounded(&catalog, MAX_CATALOG_BYTES, "Action catalog")?;
     let value: Value = strict_json(&bytes).map_err(|e| format!("Invalid action catalog: {e}"))?;
@@ -1265,6 +1276,7 @@ fn load_catalog(root: &Path) -> Result<LoadedCatalog, ActionError> {
             &mut total_bytes,
         )?;
     }
+    let _binding = measurement::span(Stage::FinalBinding);
     let inventory: Vec<_> = files
         .iter()
         .map(|(path, bytes)| json!({"path":path,"sha256":sha256(bytes)}))
@@ -1296,6 +1308,7 @@ fn role_error(error: crate::role_contract::RoleError) -> ActionError {
 pub(crate) fn verified_role_inventory(
     root: &Path,
 ) -> Result<BTreeMap<String, String>, ActionError> {
+    let _span = measurement::span(Stage::VerifiedRoleInventory);
     let loaded = load_catalog(root)?;
     if loaded.document.role_registry.is_none() {
         return Err(ActionError::new(
@@ -1362,6 +1375,7 @@ pub(crate) fn resolve_roles_with_choices_from_context(
     now_unix_secs: u64,
     choices: Option<crate::role_contract::RequestChoicesContext>,
 ) -> Result<crate::role_contract::Resolution, ActionError> {
+    let _span = measurement::span(Stage::ResolveRolesFromContext);
     let loaded = load_catalog(root)?;
     if &loaded.binding != expected {
         return Err(ActionError::new(
@@ -1408,6 +1422,7 @@ fn validate_role_inventory(
     files: &mut BTreeMap<String, Vec<u8>>,
     total_bytes: &mut usize,
 ) -> Result<(), ActionError> {
+    let _span = measurement::span(Stage::RoleInventory);
     use crate::role_contract::{CallKind, CallLocator};
     crate::role_contract::validate_registry(registry).map_err(role_error)?;
     let mut definitions = BTreeSet::new();
@@ -1505,6 +1520,8 @@ fn validate_role_inventory(
                         Some(target)
                     } else {
                         let declared = registry.call_sites.iter().find(|site| site.locator.definition == *path && site.locator.site == format!("actions.{action_index}.run.{step_index}") && site.artifact.as_ref() == Some(&target)).ok_or_else(|| ActionError::catalog("Generated child requires an exact artifact and source declaration"))?;
+                        let _child = measurement::span(Stage::ChildIdentityHash);
+                        measurement::check(Stage::ChildIdentityHash);
                         let artifact_path = confined_file(root, &target)?;
                         let capability = crate::generated_capabilities::capabilities_for_artifact(
                             &artifact_path,
@@ -1566,6 +1583,7 @@ fn validate_role_inventory(
         insert_inventory(files, total_bytes, path, bytes)?;
     }
     for site in &registry.call_sites {
+        measurement::check(Stage::RoleInventory);
         if site.kind == CallKind::ToolChild {
             let parts: Vec<_> = site.locator.site.split('.').collect();
             if parts.len() != 3
@@ -1601,6 +1619,8 @@ fn validate_role_inventory(
                 ));
             }
             if let Some(artifact) = &site.artifact {
+                let _child = measurement::span(Stage::ChildIdentityHash);
+                measurement::check(Stage::ChildIdentityHash);
                 let path = confined_file(root, artifact)?;
                 let capabilities = crate::generated_capabilities::capabilities_for_artifact(&path)
                     .map_err(|_| ActionError::catalog("Native tool child requires rebuilding"))?;
@@ -1698,6 +1718,8 @@ fn validate_role_inventory(
         ));
     }
     for name in tool_names {
+        let _tool = measurement::span(Stage::ToolInventory);
+        measurement::check(Stage::ToolInventory);
         let content = registry.tool_content.get(name).ok_or_else(|| {
             ActionError::catalog("Native role tools require an explicit portable source inventory")
         })?;
@@ -1857,6 +1879,7 @@ fn collect_role_source_files(
     files: &mut Vec<String>,
     depth: usize,
 ) -> Result<(), ActionError> {
+    let _scan = measurement::span(Stage::ToolSourceScan);
     if depth > 16 || files.len() > 256 {
         return Err(ActionError::catalog(
             "Role tool source inventory exceeds its finite bounds",
@@ -1869,6 +1892,7 @@ fn collect_role_source_files(
     )?;
     for entry in fs::read_dir(directory).map_err(ActionError::catalog)? {
         let entry = entry.map_err(ActionError::catalog)?;
+        measurement::check(Stage::ToolSourceScan);
         let name = entry.file_name();
         if matches!(name.to_str(), Some("target" | ".git")) {
             continue;
@@ -1947,15 +1971,32 @@ fn confined_file(root: &Path, raw: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 fn read_bounded(path: &Path, limit: usize, label: &str) -> Result<Vec<u8>, String> {
+    #[cfg(feature = "preparation-metrics")]
+    let stage = match label {
+        "Action catalog" => Stage::CatalogRead,
+        "Generated child source" | "Generated native child" | "Native tool child" => {
+            Stage::ChildIdentityHash
+        }
+        "Native tool identity"
+        | "Role tool manifest"
+        | "Role tool source"
+        | "Native role tool manifest"
+        | "Native role tool artifact" => Stage::ToolInventory,
+        _ => Stage::DefinitionResourceReads,
+    };
+    #[cfg(feature = "preparation-metrics")]
+    let _span = measurement::span(stage);
+    measurement::read_attempt();
     let file = fs::File::open(path).map_err(|e| format!("Cannot read {label}: {e}"))?;
+    measurement::file_opened();
     let metadata = file.metadata().map_err(|e| e.to_string())?;
     if !metadata.is_file() || metadata.len() > limit as u64 {
         return Err(format!("{label} must be a regular file no larger than {limit} bytes.").into());
     }
     let mut bytes = Vec::new();
-    file.take((limit + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
+    let result = file.take((limit + 1) as u64).read_to_end(&mut bytes);
+    measurement::read_bytes(bytes.len());
+    result.map_err(|e| e.to_string())?;
     if bytes.len() > limit {
         return Err(format!("{label} exceeds its {limit}-byte limit.").into());
     }
@@ -1985,6 +2026,7 @@ fn identifier(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 fn sha256(bytes: &[u8]) -> String {
+    measurement::hashed(bytes.len());
     format!("{:x}", Sha256::digest(bytes))
 }
 fn validate_digest(value: &str) -> Result<(), String> {
@@ -2526,8 +2568,7 @@ mod tests {
         assert!(registry.call_sites[0].fixed.is_none());
     }
 
-    #[test]
-    fn role_contract_tool_manifest_source_and_native_artifact_drift_change_binding() {
+    fn role_tool_fixture() -> (Fixture, Value) {
         let (fixture, mut catalog) = role_fixture();
         let mut definition: Value =
             serde_json::from_slice(&fs::read(fixture.root.join("agent.json")).unwrap()).unwrap();
@@ -2582,6 +2623,12 @@ mod tests {
         )
         .unwrap();
         fixture.write_catalog(&catalog);
+        (fixture, catalog)
+    }
+
+    #[test]
+    fn role_contract_tool_manifest_source_and_native_artifact_drift_change_binding() {
+        let (fixture, _) = role_tool_fixture();
         let before = discover(&fixture.root).unwrap().binding;
         fs::write(
             fixture.root.join(".cargo-ai/tools/helper/bin/helper"),
@@ -2598,6 +2645,254 @@ mod tests {
         assert_ne!(binary_change, discover(&fixture.root).unwrap().binding);
         fs::write(fixture.root.join("tools/helper/src/unlisted.rs"), "hidden").unwrap();
         assert!(discover(&fixture.root).is_err());
+    }
+
+    #[cfg(feature = "preparation-metrics")]
+    mod preparation_metrics {
+        use super::*;
+        use measurement::{Report, Session};
+
+        fn fixture() -> Fixture {
+            fixture_with_sizes(128 * 1024, 256 * 1024)
+        }
+
+        fn fixture_with_sizes(child_bytes: usize, tool_bytes: usize) -> Fixture {
+            let (fixture, mut catalog) = role_tool_fixture();
+            catalog["role_registry"]["call_sites"][2]["artifact"] = json!("child.bin");
+            let definition: Value =
+                serde_json::from_slice(&fs::read(fixture.root.join("child.json")).unwrap())
+                    .unwrap();
+            let identity = crate::role_contract::canonical_identity(&definition).unwrap();
+            let mut artifact = vec![0x5a; child_bytes];
+            artifact.extend(crate::generated_capability_record::encoded_record(false));
+            artifact.extend(crate::generated_capability_record::DEFINITION_OPEN);
+            artifact.extend(identity.as_bytes());
+            artifact.extend(crate::generated_capability_record::DEFINITION_CLOSE);
+            fs::write(fixture.root.join("child.bin"), artifact).unwrap();
+            fs::write(
+                fixture.root.join(".cargo-ai/tools/helper/bin/helper"),
+                vec![0x35; tool_bytes],
+            )
+            .unwrap();
+            fixture.write_catalog(&catalog);
+            fixture
+        }
+
+        fn list(root: &Path) -> Value {
+            let args = crate::args::parse_cli(
+                "cargo-ai",
+                [
+                    "cargo-ai",
+                    "actions",
+                    "list",
+                    "--project",
+                    root.to_str().unwrap(),
+                ]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+            )
+            .unwrap();
+            machine_run(args.subcommand_matches("actions").unwrap()).unwrap()
+        }
+
+        fn measured(root: &Path) -> (Value, Report) {
+            let capture = Session::capture();
+            let result = list(root);
+            (result, capture.finish())
+        }
+
+        fn timing_is_partitioned(report: &Report) {
+            assert!(report
+                .stages
+                .values()
+                .all(|stage| stage.exclusive_ns <= stage.inclusive_ns));
+            assert!(
+                report
+                    .stages
+                    .values()
+                    .map(|stage| stage.exclusive_ns)
+                    .sum::<u64>()
+                    <= report.elapsed_ns
+            );
+        }
+
+        #[test]
+        fn preparation_metrics_exact_real_metadata_counts_and_binding_preservation() {
+            let fixture = fixture();
+            let baseline = list(&fixture.root);
+            let loaded = load_catalog(&fixture.root).unwrap();
+            let (result, report) = measured(&fixture.root);
+            assert_eq!(result, baseline);
+            timing_is_partitioned(&report);
+            let row = |stage| &report.stages[&stage];
+            assert_eq!(row(Stage::LoadTarget).invocations, 1);
+            assert_eq!(row(Stage::InstalledAuthorityLease).invocations, 2);
+            assert_eq!(row(Stage::Discover).invocations, 1);
+            assert_eq!(row(Stage::LoadCatalog).invocations, 1);
+            assert_eq!(row(Stage::CatalogRead).read_attempts, 1);
+            assert_eq!(row(Stage::CatalogRead).files_opened, 1);
+            assert_eq!(
+                row(Stage::CatalogRead).read_bytes,
+                fs::metadata(fixture.root.join(CATALOG_FILE)).unwrap().len()
+            );
+            assert_eq!(row(Stage::DefinitionResourceReads).files_opened, 5);
+            let file_len = |relative| fs::metadata(fixture.root.join(relative)).unwrap().len();
+            assert_eq!(
+                row(Stage::DefinitionResourceReads).read_bytes,
+                file_len("agent.json") * 2
+                    + file_len("child.json")
+                    + file_len("page.html")
+                    + file_len("page.js")
+            );
+            assert_eq!(row(Stage::RoleInventory).checks, 3);
+            assert_eq!(row(Stage::ChildIdentityHash).checks, 1);
+            assert_eq!(row(Stage::ChildIdentityHash).files_opened, 1);
+            assert_eq!(
+                row(Stage::ChildIdentityHash).read_bytes,
+                file_len("child.bin")
+            );
+            assert_eq!(row(Stage::ChildIdentityHash).hash_calls, 2);
+            assert_eq!(
+                row(Stage::ChildIdentityHash).hash_bytes,
+                file_len("child.bin") + file_len("child.json")
+            );
+            for stage in [Stage::ChildCapabilityScan, Stage::ChildDefinitionScan] {
+                assert_eq!(row(stage).invocations, 1);
+                assert_eq!(row(stage).files_opened, 1);
+                assert_eq!(row(stage).read_bytes, file_len("child.bin"));
+            }
+            assert_eq!(row(Stage::ToolInventory).checks, 1);
+            assert_eq!(row(Stage::ToolInventory).files_opened, 5);
+            assert_eq!(
+                row(Stage::ToolInventory).read_bytes,
+                file_len(".cargo-ai/tools/helper/tool.json") * 2
+                    + file_len("tools/helper/Cargo.toml")
+                    + file_len("tools/helper/src/main.rs")
+                    + file_len(".cargo-ai/tools/helper/bin/helper")
+            );
+            assert_eq!(row(Stage::ToolInventory).hash_calls, 1);
+            assert_eq!(
+                row(Stage::ToolInventory).hash_bytes,
+                file_len(".cargo-ai/tools/helper/bin/helper")
+            );
+            assert_eq!(row(Stage::ToolSourceScan).invocations, 2);
+            assert_eq!(row(Stage::ToolSourceScan).checks, 3);
+            assert_eq!(loaded.files.len(), 10);
+            assert_eq!(row(Stage::FinalBinding).hash_calls, 13);
+            let inventory: Vec<_> = loaded
+                .files
+                .iter()
+                .map(|(path, bytes)| json!({"path":path,"sha256":sha256(bytes)}))
+                .collect();
+            assert_eq!(
+                row(Stage::FinalBinding).hash_bytes,
+                loaded
+                    .files
+                    .values()
+                    .map(|bytes| bytes.len() as u64)
+                    .sum::<u64>()
+                    + fixture.root.to_string_lossy().len() as u64
+                    + file_len(CATALOG_FILE)
+                    + serde_json::to_vec(&inventory).unwrap().len() as u64
+            );
+            let serialized = serde_json::to_string(&report).unwrap();
+            for private in [
+                fixture.root.to_str().unwrap(),
+                "agent.json",
+                "helper",
+                "answer",
+            ] {
+                assert!(!serialized.contains(private));
+            }
+            // Adding inert trailing bytes preserves the valid marker but changes binding.
+            let mut child = fs::read(fixture.root.join("child.bin")).unwrap();
+            child.push(0);
+            fs::write(fixture.root.join("child.bin"), child).unwrap();
+            assert_ne!(list(&fixture.root)["binding"], baseline["binding"]);
+            assert_eq!(
+                resource(&fixture.root, "panels", "page", &loaded.binding)
+                    .unwrap_err()
+                    .code,
+                "action.stale_binding"
+            );
+        }
+
+        #[test]
+        fn preparation_metrics_prepare_and_error_paths_preserve_output_and_cleanup() {
+            let fixture = Fixture::new();
+            let request = fixture.request();
+            let expected = prepare(&fixture.root, &request).unwrap();
+            let capture = Session::capture();
+            let actual = prepare(&fixture.root, &request).unwrap();
+            let report = capture.finish();
+            assert_eq!(actual.binding, expected.binding);
+            assert_eq!(actual.run_vars, expected.run_vars);
+            assert_eq!(actual.input_overrides, expected.input_overrides);
+            assert_eq!(report.stages[&Stage::Prepare].invocations, 1);
+            timing_is_partitioned(&report);
+            fs::write(fixture.root.join("page.js"), "changed").unwrap();
+            let capture = Session::capture();
+            assert_eq!(
+                prepare(&fixture.root, &request).unwrap_err().code,
+                "action.stale_binding"
+            );
+            timing_is_partitioned(&capture.finish());
+            let capture = Session::capture();
+            assert!(discover(&fixture.root.join("absent")).is_err());
+            let report = capture.finish();
+            assert_eq!(report.stages[&Stage::LoadCatalog].invocations, 1);
+            assert!(!report.stages.contains_key(&Stage::CatalogRead));
+            timing_is_partitioned(&report);
+        }
+
+        #[test]
+        #[ignore = "bounded diagnostic benchmark; no execution, accounts or installed package mutation"]
+        fn preparation_metrics_bounded_real_metadata_samples() {
+            let fixture = fixture_with_sizes(8 * 1024 * 1024, 4 * 1024 * 1024);
+            let root =
+                if let Some(destination) = std::env::var_os("CARGO_AI_PREPARATION_FIXTURE_DIR") {
+                    let destination = PathBuf::from(destination);
+                    // An explicit destination is retained for fresh-process metadata checks.
+                    // Refuse an existing path; this benchmark never replaces caller files.
+                    fs::create_dir(&destination).unwrap();
+                    for relative in [
+                        CATALOG_FILE,
+                        "agent.json",
+                        "child.json",
+                        "child.bin",
+                        "page.html",
+                        "page.js",
+                        "tools/helper/Cargo.toml",
+                        "tools/helper/src/main.rs",
+                        ".cargo-ai/tools/helper/tool.json",
+                        ".cargo-ai/tools/helper/bin/helper",
+                    ] {
+                        let target = destination.join(relative);
+                        fs::create_dir_all(target.parent().unwrap()).unwrap();
+                        fs::copy(fixture.root.join(relative), target).unwrap();
+                    }
+                    fs::canonicalize(destination).unwrap()
+                } else {
+                    fixture.root.clone()
+                };
+            // The first observed sample has unknown OS cache state. No cache flush is implied.
+            let mut expected = None;
+            for sample in 0..8 {
+                let (result, report) = measured(&root);
+                if let Some(expected) = &expected {
+                    assert_eq!(&result, expected);
+                } else {
+                    expected = Some(result);
+                }
+                timing_is_partitioned(&report);
+                eprintln!(
+                    "{}",
+                    json!({"sample":sample,"order":if sample == 0 {"first_observed"} else {"repeat"},
+                    "fixture":"synthetic_project_child_tool_resources","installed_lease":"negative_path_only", "metrics":report})
+                );
+            }
+        }
     }
 
     #[test]

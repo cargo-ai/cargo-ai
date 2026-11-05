@@ -92,6 +92,7 @@ fn resolve_with_home(
     home: &Path,
     now: u64,
 ) -> Result<Resolution, Failure> {
+    let _span = client_actions::measurement::span(client_actions::measurement::Stage::ResolveRoles);
     if !matches!(request.schema_version, 3 | 4) {
         return Err(Failure::new(
             "role.unsupported_contract",
@@ -331,8 +332,11 @@ fn validated_profiles(
     home: &Path,
     revision: &BindingRevision,
 ) -> Result<BTreeMap<String, role_context::ValidatedProfileContext>, Failure> {
+    let _span =
+        client_actions::measurement::span(client_actions::measurement::Stage::ProfileValidation);
     let mut profiles = BTreeMap::new();
     for binding in &revision.bindings {
+        client_actions::measurement::check(client_actions::measurement::Stage::ProfileValidation);
         let selected =
             role_context::resolve_at(home, &binding.profile_uuid, &binding.connection_generation)
                 .map_err(|_| context_unavailable().with_data(json!({"role":binding.role})))?;
@@ -839,6 +843,8 @@ mod tests {
             .clear();
         let absent = fixture.base.join("absent-parent/home");
         let before = fixture.snapshot();
+        #[cfg(feature = "preparation-metrics")]
+        let measurement = client_actions::measurement::Session::capture();
         let first = resolve_with_home(
             &fixture.root,
             &fixture.request,
@@ -846,6 +852,13 @@ mod tests {
             role_context::now(),
         )
         .unwrap();
+        #[cfg(feature = "preparation-metrics")]
+        {
+            let report = measurement.finish();
+            let profiles = &report.stages[&client_actions::measurement::Stage::ProfileValidation];
+            assert_eq!(profiles.invocations, 2);
+            assert_eq!(profiles.checks, 0);
+        }
         assert!(first.ready);
         assert!(!first.execution_authorized);
         assert_eq!(first.calls[0].reason, "structural_native_child");
