@@ -1523,10 +1523,14 @@ fn validate_role_inventory(
                         let _child = measurement::span(Stage::ChildIdentityHash);
                         measurement::check(Stage::ChildIdentityHash);
                         let artifact_path = confined_file(root, &target)?;
-                        let capability = crate::generated_capabilities::capabilities_for_artifact(
+                        let artifact_bytes = read_bounded(
                             &artifact_path,
-                        )
-                        .map_err(|_| {
+                            128 * 1024 * 1024,
+                            "Generated native child",
+                        )?;
+                        let inspection =
+                            crate::generated_capabilities::inspect_artifact_bytes(&artifact_bytes);
+                        let capability = inspection.capabilities.map_err(|_| {
                             ActionError::catalog("Generated native role child requires rebuilding")
                         })?;
                         if !capability.supports_native_roles() {
@@ -1546,20 +1550,11 @@ fn validate_role_inventory(
                         let source_identity =
                             crate::role_contract::canonical_identity(&source_value)
                                 .map_err(role_error)?;
-                        if crate::generated_capabilities::definition_for_artifact(&artifact_path)
-                            .ok()
-                            .as_deref()
-                            != Some(&source_identity)
-                        {
+                        if inspection.definition.ok().as_deref() != Some(&source_identity) {
                             return Err(ActionError::catalog(
                                 "Generated child source changed; rebuild the declared artifact",
                             ));
                         }
-                        let artifact_bytes = read_bounded(
-                            &artifact_path,
-                            128 * 1024 * 1024,
-                            "Generated native child",
-                        )?;
                         insert_inventory(
                             files,
                             total_bytes,
@@ -1622,22 +1617,21 @@ fn validate_role_inventory(
                 let _child = measurement::span(Stage::ChildIdentityHash);
                 measurement::check(Stage::ChildIdentityHash);
                 let path = confined_file(root, artifact)?;
-                let capabilities = crate::generated_capabilities::capabilities_for_artifact(&path)
+                let bytes = read_bounded(&path, 128 * 1024 * 1024, "Native tool child")?;
+                let inspection = crate::generated_capabilities::inspect_artifact_bytes(&bytes);
+                let capabilities = inspection
+                    .capabilities
                     .map_err(|_| ActionError::catalog("Native tool child requires rebuilding"))?;
                 let source =
                     crate::role_contract::canonical_identity(&definition).map_err(role_error)?;
                 if !capabilities.supports_native_roles()
                     || capabilities.is_cli_run()
-                    || crate::generated_capabilities::definition_for_artifact(&path)
-                        .ok()
-                        .as_deref()
-                        != Some(&source)
+                    || inspection.definition.ok().as_deref() != Some(&source)
                 {
                     return Err(ActionError::catalog(
                         "Native tool child source or contract requires rebuilding",
                     ));
                 }
-                let bytes = read_bounded(&path, 128 * 1024 * 1024, "Native tool child")?;
                 insert_inventory(
                     files,
                     total_bytes,
@@ -2647,6 +2641,146 @@ mod tests {
         assert!(discover(&fixture.root).is_err());
     }
 
+    fn marked_child_bytes(definition: &Value, cli_run: bool, padding: usize) -> Vec<u8> {
+        let identity = crate::role_contract::canonical_identity(definition).unwrap();
+        let mut artifact = vec![0x5a; padding];
+        artifact.extend(crate::generated_capability_record::encoded_record(cli_run));
+        artifact.extend(crate::generated_capability_record::DEFINITION_OPEN);
+        artifact.extend(identity.as_bytes());
+        artifact.extend(crate::generated_capability_record::DEFINITION_CLOSE);
+        artifact
+    }
+
+    fn generated_child_fixture(tool_child: bool) -> (Fixture, Vec<u8>) {
+        let (fixture, mut catalog) = role_tool_fixture();
+        catalog["role_registry"]["call_sites"][2]["artifact"] = json!("child.bin");
+        if !tool_child {
+            let mut definition: Value =
+                serde_json::from_slice(&fs::read(fixture.root.join("agent.json")).unwrap())
+                    .unwrap();
+            definition["actions"][0]["run"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"kind":"agent","artifact":"./child.bin"}));
+            fs::write(
+                fixture.root.join("agent.json"),
+                serde_json::to_vec(&definition).unwrap(),
+            )
+            .unwrap();
+            let site = &mut catalog["role_registry"]["call_sites"][2];
+            site["kind"] = json!("child");
+            site["locator"]["site"] = json!("actions.0.run.1");
+            site.as_object_mut().unwrap().remove("input_schema");
+        }
+        let definition: Value =
+            serde_json::from_slice(&fs::read(fixture.root.join("child.json")).unwrap()).unwrap();
+        let bytes = marked_child_bytes(&definition, false, 1024);
+        fs::write(fixture.root.join("child.bin"), &bytes).unwrap();
+        fixture.write_catalog(&catalog);
+        (fixture, bytes)
+    }
+
+    #[test]
+    fn generated_child_buffer_preserves_contract_binding_and_fresh_validation() {
+        for tool_child in [false, true] {
+            let (fixture, original) = generated_child_fixture(tool_child);
+            let child_path = fixture.root.join("child.bin");
+            let loaded = load_catalog(&fixture.root).unwrap();
+            assert_eq!(
+                loaded.files["native-child:child.bin"],
+                sha256(&original).into_bytes()
+            );
+            let binding = loaded.binding;
+            assert_eq!(discover(&fixture.root).unwrap().binding, binding);
+
+            let mut changed = original.clone();
+            changed.push(0);
+            fs::write(&child_path, changed).unwrap();
+            assert_ne!(discover(&fixture.root).unwrap().binding, binding);
+            assert_eq!(
+                resource(&fixture.root, "panels", "page", &binding)
+                    .unwrap_err()
+                    .code,
+                "action.stale_binding"
+            );
+            fs::write(&child_path, &original).unwrap();
+
+            let source_path = fixture.root.join("child.json");
+            let source_bytes = fs::read(&source_path).unwrap();
+            let mut definition: Value = serde_json::from_slice(&source_bytes).unwrap();
+            definition["agent_schema"]["properties"]["answer"]["type"] = json!("number");
+            fs::write(&source_path, serde_json::to_vec(&definition).unwrap()).unwrap();
+            assert_eq!(
+                discover(&fixture.root).unwrap_err().code,
+                "action.invalid_catalog"
+            );
+            fs::write(&source_path, &source_bytes).unwrap();
+
+            let capability = crate::generated_capability_record::encoded_record(false);
+            let capability_start = 1024;
+            let definition_start = capability_start + capability.len();
+            let mut malformed = original.clone();
+            malformed[capability_start + 16] ^= 1;
+            let mut unsupported = original.clone();
+            unsupported[capability_start + 16 + 26] = 255;
+            let mut duplicate_capability = original.clone();
+            duplicate_capability.extend_from_slice(&capability);
+            let mut duplicate_definition = original.clone();
+            duplicate_definition.extend_from_slice(&original[definition_start..]);
+            let mut wrong_definition = original.clone();
+            wrong_definition[definition_start + 16..definition_start + 80].fill(b'b');
+            let mut malformed_definition = original.clone();
+            malformed_definition[definition_start + 16] = b'A';
+            let legacy = [
+                &original[..capability_start],
+                crate::generated_capabilities::test_record(4).as_slice(),
+                &original[definition_start..],
+            ]
+            .concat();
+            for rejected in [
+                malformed,
+                unsupported,
+                duplicate_capability,
+                duplicate_definition,
+                wrong_definition,
+                malformed_definition,
+                legacy,
+                original[..definition_start].to_vec(),
+                original[definition_start..].to_vec(),
+            ] {
+                fs::write(&child_path, rejected).unwrap();
+                let error = discover(&fixture.root).unwrap_err();
+                assert_eq!(error.code, "action.invalid_catalog");
+                assert_eq!(error.message, "The declared action catalog is invalid.");
+            }
+
+            let source: Value = serde_json::from_slice(&source_bytes).unwrap();
+            fs::write(&child_path, marked_child_bytes(&source, true, 1024)).unwrap();
+            // Direct native children retain support for CLI-run declarations;
+            // tool-child contracts continue to reject them.
+            if tool_child {
+                assert_eq!(
+                    discover(&fixture.root).unwrap_err().code,
+                    "action.invalid_catalog"
+                );
+            } else {
+                assert!(discover(&fixture.root).is_ok());
+            }
+
+            fs::write(&child_path, &original).unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&child_path)
+                .unwrap()
+                .set_len(128 * 1024 * 1024 + 1)
+                .unwrap();
+            assert_eq!(
+                discover(&fixture.root).unwrap_err().code,
+                "action.invalid_catalog"
+            );
+        }
+    }
+
     #[cfg(feature = "preparation-metrics")]
     mod preparation_metrics {
         use super::*;
@@ -2662,12 +2796,7 @@ mod tests {
             let definition: Value =
                 serde_json::from_slice(&fs::read(fixture.root.join("child.json")).unwrap())
                     .unwrap();
-            let identity = crate::role_contract::canonical_identity(&definition).unwrap();
-            let mut artifact = vec![0x5a; child_bytes];
-            artifact.extend(crate::generated_capability_record::encoded_record(false));
-            artifact.extend(crate::generated_capability_record::DEFINITION_OPEN);
-            artifact.extend(identity.as_bytes());
-            artifact.extend(crate::generated_capability_record::DEFINITION_CLOSE);
+            let artifact = marked_child_bytes(&definition, false, child_bytes);
             fs::write(fixture.root.join("child.bin"), artifact).unwrap();
             fs::write(
                 fixture.root.join(".cargo-ai/tools/helper/bin/helper"),
@@ -2757,11 +2886,12 @@ mod tests {
                 row(Stage::ChildIdentityHash).hash_bytes,
                 file_len("child.bin") + file_len("child.json")
             );
-            for stage in [Stage::ChildCapabilityScan, Stage::ChildDefinitionScan] {
-                assert_eq!(row(stage).invocations, 1);
-                assert_eq!(row(stage).files_opened, 1);
-                assert_eq!(row(stage).read_bytes, file_len("child.bin"));
-            }
+            assert_eq!(row(Stage::ChildArtifactScan).invocations, 1);
+            assert_eq!(row(Stage::ChildArtifactScan).checks, 1);
+            assert_eq!(row(Stage::ChildArtifactScan).files_opened, 0);
+            assert_eq!(row(Stage::ChildArtifactScan).read_bytes, 0);
+            assert!(!report.stages.contains_key(&Stage::ChildCapabilityScan));
+            assert!(!report.stages.contains_key(&Stage::ChildDefinitionScan));
             assert_eq!(row(Stage::ToolInventory).checks, 1);
             assert_eq!(row(Stage::ToolInventory).files_opened, 5);
             assert_eq!(

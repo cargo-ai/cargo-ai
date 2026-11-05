@@ -17,6 +17,7 @@ pub(crate) enum Stage {
     RoleInventory,
     VerifiedRoleInventory,
     ChildIdentityHash,
+    ChildArtifactScan,
     ChildCapabilityScan,
     ChildDefinitionScan,
     ToolInventory,
