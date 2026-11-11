@@ -431,16 +431,17 @@ pub async fn run(sub_m: &ArgMatches) -> bool {
         }
     };
 
-    if !sub_m.get_flag("ignore_tools") {
-        let definition = match crate::runtime_definition::RuntimeAgentDefinition::from_str(
-            file_contents.as_str(),
-        ) {
+    let definition =
+        match crate::runtime_definition::RuntimeAgentDefinition::from_str(file_contents.as_str()) {
             Ok(definition) => definition,
             Err(error) => {
                 println!("x {error}");
                 return false;
             }
         };
+    if sub_m.get_flag("ignore_tools") {
+        println!("Tool audit: skipped (--ignore-tools); runtime checks remain enabled.");
+    } else {
         let audit_project_root = match resolution.project_root.clone() {
             Some(project_root) => Some(project_root),
             None => match project_root_for_hatch_source(&resolution.source) {

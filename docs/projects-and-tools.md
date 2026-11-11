@@ -149,7 +149,11 @@ Wire the tool into agent JSON with a tool action:
 }
 ```
 
-By default, `run`, `hatch --check`, and `hatch` audit referenced tools against their `describe` contracts before execution or compilation. They resolve project tools first and consult Cargo AI Home only when the manifest permits global fallback. Use `--ignore-tools` only when you intentionally accept a later failure if execution reaches an unavailable or incompatible tool.
+By default, `run`, `build`, `hatch --check`, and `hatch` audit referenced tools against their `describe` contracts before execution or agent compilation. They resolve project tools first and consult Cargo AI Home only when the manifest permits global fallback.
+
+For cross-target preparation, explicitly select `build --ignore-tools` or `hatch --ignore-tools` when the target tool cannot execute on the build host. This skips only the packaging-time dynamic tool audit. Definition validation, compilation, required artifacts and project boundaries still apply; compiler failures are not retried with different checks. Both commands report the audit as skipped. Successful opted-out builds also record `tool_audit = "skipped"` in `cargo-ai-build.toml`; the field is absent for default builds. This is preparation evidence, not target execution qualification.
+
+Validate the same source natively before packaging and exercise the actual tools on the target platform afterward. The packaging option is not embedded into generated agents or runtime settings: runtime tool contract, parameter and access checks remain enabled. An unavailable or incompatible tool still fails when reached. See the [machine-interface boundary](./machine-interface.md) for application callers.
 
 Ordinary `cargo ai hatch` exports the agent binary only; it does not copy project tool artifacts beside the binary. A hatched binary launched inside a Cargo AI project uses the same project-first lookup. Outside a project, it can use machine-installed tools but not project-only tools.
 

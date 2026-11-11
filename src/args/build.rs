@@ -28,6 +28,12 @@ pub fn command() -> Command {
                 .num_args(1),
         )
         .arg(
+            Arg::new("ignore_tools")
+                .long("ignore-tools")
+                .help("Skip packaging-time dynamic tool contract checks; retain definition validation, compilation and runtime checks")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("force")
                 .long("force")
                 .short('f')
@@ -79,5 +85,14 @@ mod tests {
 
         assert!(matches.get_one::<String>("profile").is_none());
         assert!(!matches.get_flag("force"));
+        assert!(!matches.get_flag("ignore_tools"));
+    }
+
+    #[test]
+    fn build_tool_audit_skip_requires_explicit_flag() {
+        let matches = super::command()
+            .try_get_matches_from(["build", "--ignore-tools"])
+            .unwrap();
+        assert!(matches.get_flag("ignore_tools"));
     }
 }

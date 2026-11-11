@@ -118,7 +118,7 @@ pub fn command() -> Command {
         .arg(
             Arg::new("ignore_tools")
                 .long("ignore-tools")
-                .help("Skip upfront tool contract checks while hatching or checking")
+                .help("Skip packaging-time dynamic tool contract checks; retain definition validation, compilation and runtime checks")
                 .required(false)
                 .action(clap::ArgAction::SetTrue),
         )

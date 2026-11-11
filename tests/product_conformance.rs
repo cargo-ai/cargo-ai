@@ -1,5 +1,7 @@
 //! Process-level coverage for the public Cargo AI CLI spine.
 
+#[path = "product_conformance/packaging_audit.rs"]
+mod packaging_audit;
 mod support;
 #[path = "product_conformance/usage_attribution.rs"]
 mod usage_attribution;
