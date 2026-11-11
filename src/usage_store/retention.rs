@@ -767,7 +767,7 @@ mod tests {
             let mut writer = super::super::open_at(&fixture.0, true).unwrap().unwrap();
             insert_event(&writer, &event(1, "2026-10-10T00:00:00Z")).unwrap();
             configure_at(&mut writer, &enabled(true)).unwrap();
-            let reader = Connection::open(fixture.0.join("usage.sqlite3")).unwrap();
+            let mut reader = Connection::open(fixture.0.join("usage.sqlite3")).unwrap();
             reader.pragma_update(None, "foreign_keys", true).unwrap();
             reader.busy_handler(Some(waiting_for_writer)).unwrap();
             let tx = writer
