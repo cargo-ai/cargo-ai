@@ -67,9 +67,14 @@ mod platform {
     unsafe extern "C" {
         fn openat(fd: i32, path: *const std::ffi::c_char, flags: i32, ...) -> i32;
     }
-    #[cfg(target_os = "linux")]
+    // Linux open flags follow the target architecture's ABI.
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    const FLAGS: i32 = 0x8000 | 0x80000 | 0x800; // NOFOLLOW | CLOEXEC | NONBLOCK
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    const DIRECTORY: i32 = 0x4000;
+    #[cfg(all(target_os = "linux", not(target_arch = "aarch64")))]
     const FLAGS: i32 = 0x20000 | 0x80000 | 0x800; // NOFOLLOW | CLOEXEC | NONBLOCK
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(target_arch = "aarch64")))]
     const DIRECTORY: i32 = 0x10000;
     #[cfg(target_os = "macos")]
     const FLAGS: i32 = 0x100 | 0x1000000 | 0x4;
@@ -367,6 +372,47 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nested_regular_file_reads_exact_bytes_within_limit() {
+        let root =
+            std::env::temp_dir().join(format!("cargo-artifact-read-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".cargo-ai")).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let bytes = b"[project]\nname = \"example\"\n";
+        std::fs::write(root.join(".cargo-ai/project.toml"), bytes).unwrap();
+        assert_eq!(
+            read(&root, ".cargo-ai/project.toml", bytes.len()).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            read(&root, ".cargo-ai/project.toml", bytes.len() - 1)
+                .unwrap_err()
+                .code,
+            "artifact.size_limit"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_read_rejects_leaf_and_ancestor_symlinks_directly() {
+        use std::os::unix::fs::symlink;
+        let root =
+            std::env::temp_dir().join(format!("cargo-artifact-links-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        std::fs::write(root.join("nested/value.txt"), b"original").unwrap();
+        symlink("nested/value.txt", root.join("leaf.txt")).unwrap();
+        symlink("nested", root.join("ancestor")).unwrap();
+        for relative in ["leaf.txt", "ancestor/value.txt"] {
+            assert_eq!(
+                read(&root, relative, 100).unwrap_err().code,
+                "artifact.unsafe_file"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn replacement_and_mutation_during_read_are_rejected() {
         let root =
