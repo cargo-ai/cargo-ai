@@ -152,13 +152,13 @@ fn gate() -> &'static Path {
     GATE.get_or_init(|| {
         // Build the real example once, in this test's existing Cargo target tree.
         let exe = std::env::current_exe().unwrap();
-        let profile = exe.parent().unwrap().parent().unwrap();
         let mut command = Command::new(env!("CARGO"));
         command.current_dir(env!("CARGO_MANIFEST_DIR")).args([
             "build",
             "--locked",
             "--example",
             "qualification-gate",
+            "--message-format=json-render-diagnostics",
         ]);
         for provider in PROVIDERS {
             command.env_remove(format!("{}_API_KEY", provider.to_uppercase()));
@@ -172,29 +172,129 @@ fn gate() -> &'static Path {
             .unwrap();
         // The local wrapper passes --target as an argument, not an environment variable.
         // Match that target tree; native CI without an explicit target keeps its layout.
-        if profile
-            .parent()
-            .and_then(Path::file_name)
-            .is_some_and(|name| name == host)
-        {
-            command.args(["--target", host]);
-        } else if let Ok(target) = std::env::var("CARGO_BUILD_TARGET") {
-            command.args(["--target", &target]);
+        let configured_target = std::env::var("CARGO_BUILD_TARGET").ok();
+        if let Some(target) = gate_build_target(&exe, host, configured_target.as_deref()) {
+            command.args(["--target", target]);
         }
-        if !command.status().unwrap().success() {
+        let output = command
+            .output()
+            .map_err(|error| format!("cannot build maintainer example: {error}"))?;
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        if !output.status.success() {
             return Err("maintainer example failed to build; no retry in this test run".into());
         }
-        let path = profile.join("examples").join(format!(
-            "qualification-gate{}",
-            std::env::consts::EXE_SUFFIX
-        ));
-        if !path.is_file() {
-            return Err(format!("maintainer example missing at {}", path.display()));
-        }
-        Ok(path)
+        gate_artifact(&output.stdout)
     })
     .as_ref()
     .expect("maintainer entrypoint must build")
+}
+
+fn gate_build_target<'a>(
+    executable: &Path,
+    host: &'a str,
+    configured: Option<&'a str>,
+) -> Option<&'a str> {
+    if executable
+        .ancestors()
+        .skip(1)
+        .any(|ancestor| ancestor.file_name().is_some_and(|name| name == host))
+    {
+        Some(host)
+    } else {
+        configured
+    }
+}
+
+fn gate_artifact(output: &[u8]) -> Result<PathBuf, String> {
+    let text = std::str::from_utf8(output)
+        .map_err(|_| "invalid maintainer example build output".to_owned())?;
+    let artifacts: Vec<Value> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|artifact| {
+            artifact["reason"] == "compiler-artifact"
+                && artifact["target"]["name"] == "qualification-gate"
+                && artifact["target"]["kind"]
+                    .as_array()
+                    .is_some_and(|kinds| kinds.iter().any(|kind| kind == "example"))
+        })
+        .collect();
+    if artifacts.len() != 1 {
+        return Err("expected exactly one compiled maintainer example artifact".into());
+    }
+    let path = artifacts[0]["executable"]
+        .as_str()
+        .map(PathBuf::from)
+        .ok_or("compiled maintainer example has no executable")?;
+    if !path.is_absolute() || !path.is_file() {
+        return Err(format!(
+            "invalid maintainer example executable: {}",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+#[test]
+fn maintainer_artifact_uses_exact_cargo_output_and_rejects_invalid_selection() {
+    let fixture = Fixture::new();
+    let executable = fixture.path("reported-output");
+    fs::write(&executable, b"artifact selection fixture").unwrap();
+    let executable = fs::canonicalize(executable).unwrap();
+    let artifact = json!({
+        "reason": "compiler-artifact",
+        "target": {"name": "qualification-gate", "kind": ["example"]},
+        "executable": executable,
+    });
+    let mut unrelated = artifact.clone();
+    unrelated["target"]["name"] = json!("another-example");
+    let mut wrong_kind = artifact.clone();
+    wrong_kind["target"]["kind"] = json!(["bin"]);
+    let output = format!("{unrelated}\n{wrong_kind}\n{artifact}\n");
+    assert_eq!(gate_artifact(output.as_bytes()).unwrap(), executable);
+    for output in [
+        String::new(),
+        unrelated.to_string(),
+        wrong_kind.to_string(),
+        format!("{artifact}\n{artifact}\n"),
+    ] {
+        assert!(gate_artifact(output.as_bytes()).is_err());
+    }
+    for path in [
+        Value::Null,
+        json!("relative-executable"),
+        json!(fixture.path("missing-executable")),
+        json!(fixture.0),
+    ] {
+        let mut invalid = artifact.clone();
+        invalid["executable"] = path;
+        assert!(gate_artifact(invalid.to_string().as_bytes()).is_err());
+    }
+    assert!(gate_artifact(&[0xff]).is_err());
+}
+
+#[test]
+fn maintainer_target_preserves_native_override_across_cargo_layouts() {
+    let host = "aarch64-apple-darwin";
+    let configured = "x86_64-unknown-linux-musl";
+    for tail in [
+        "debug/deps/qualification_policy-hash",
+        "debug/build/cargo-ai/hash/out/qualification_policy-hash",
+        "release/build/cargo-ai/hash/out/qualification_policy-hash",
+    ] {
+        let explicit_native = Path::new("custom-target-tree").join(host).join(tail);
+        assert_eq!(gate_build_target(&explicit_native, host, None), Some(host));
+        assert_eq!(
+            gate_build_target(&explicit_native, host, Some(configured)),
+            Some(host)
+        );
+        let implicit_native = Path::new("custom-target-tree").join(tail);
+        assert_eq!(gate_build_target(&implicit_native, host, None), None);
+        assert_eq!(
+            gate_build_target(&implicit_native, host, Some(configured)),
+            Some(configured)
+        );
+    }
 }
 
 fn catalog() -> String {
