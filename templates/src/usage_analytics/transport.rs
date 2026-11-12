@@ -408,67 +408,263 @@ mod tests {
 #[cfg(test)]
 mod v2_tests {
     use super::*;
+    use std::{future::Future, pin::Pin, task::Poll};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        sync::oneshot,
+        time::Instant,
+    };
+
+    struct ControlledClock {
+        stop: Option<std::sync::mpsc::Sender<()>>,
+        expired: oneshot::Receiver<()>,
+        worker: Option<tokio::task::JoinHandle<()>>,
+    }
+    impl ControlledClock {
+        fn new() -> Self {
+            let (stop, stopped) = std::sync::mpsc::channel();
+            let (expired, expiration) = oneshot::channel();
+            // A live Tokio blocking task inhibits paused-clock auto-advance while
+            // real socket I/O is pending. Its wall deadline also bounds deadlocks.
+            let worker = tokio::task::spawn_blocking(move || {
+                if matches!(
+                    stopped.recv_timeout(Duration::from_secs(10)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    let _ = expired.send(());
+                }
+            });
+            Self {
+                stop: Some(stop),
+                expired: expiration,
+                worker: Some(worker),
+            }
+        }
+        async fn wait<F: Future>(&mut self, future: F) -> F::Output {
+            tokio::select! {
+                biased;
+                _ = &mut self.expired => panic!("controlled-time fixture exceeded its wall watchdog"),
+                result = future => result,
+            }
+        }
+        async fn advance(&mut self, millis: u64) {
+            assert!(millis > 1);
+            let deadline = Instant::now() + Duration::from_millis(millis);
+            // Leave one millisecond for the timer wheel's deadline rounding.
+            let marker = tokio::time::sleep_until(deadline - Duration::from_millis(1));
+            tokio::pin!(marker);
+            expect_pending(marker.as_mut(), "clock marker before advance").await;
+            tokio::time::advance(Duration::from_millis(millis)).await;
+            // advance() only yields; observing this registered marker establishes
+            // that the timer driver has processed the crossed deadline.
+            self.wait(marker).await;
+            assert_eq!(Instant::now(), deadline, "clock auto-advanced unexpectedly");
+        }
+        async fn finish(mut self) {
+            self.stop.take().unwrap().send(()).unwrap();
+            self.worker.take().unwrap().await.unwrap();
+        }
+    }
+    impl Drop for ControlledClock {
+        fn drop(&mut self) {
+            if let Some(stop) = self.stop.take() {
+                let _ = stop.send(());
+            }
+        }
+    }
+    async fn expect_pending<F: Future>(mut future: Pin<&mut F>, label: &str) {
+        std::future::poll_fn(|cx| {
+            assert!(
+                future.as_mut().poll(cx).is_pending(),
+                "{label}: completed too early"
+            );
+            Poll::Ready(())
+        })
+        .await;
+    }
+    async fn expect_complete<F: Future>(mut future: Pin<&mut F>, label: &str) -> F::Output {
+        std::future::poll_fn(|cx| match future.as_mut().poll(cx) {
+            Poll::Ready(result) => Poll::Ready(result),
+            Poll::Pending => panic!("{label}: still pending after expected deadline"),
+        })
+        .await
+    }
+    async fn receive_request(listener: &TcpListener) -> (TcpStream, Value) {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        let (header_end, length) = loop {
+            let mut chunk = [0; 1024];
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "request ended before complete admission");
+            bytes.extend_from_slice(&chunk[..read]);
+            assert!(bytes.len() <= 8192, "fixture request exceeded its bound");
+            if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                let headers = std::str::from_utf8(&bytes[..end]).unwrap();
+                assert!(headers.starts_with("POST /account HTTP/1.1\r\n"));
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .expect("complete request must declare its body length");
+                assert!(length <= 4096);
+                break (end + 4, length);
+            }
+        };
+        while bytes.len() < header_end + length {
+            let mut chunk = [0; 1024];
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert!(read > 0, "request body ended before complete admission");
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        assert_eq!(bytes.len(), header_end + length);
+        let body = serde_json::from_slice(&bytes[header_end..]).unwrap();
+        (socket, body)
+    }
+    async fn admit<F: Future>(
+        clock: &mut ControlledClock,
+        listener: &TcpListener,
+        operation: Pin<&mut F>,
+    ) -> (TcpStream, Value) {
+        clock
+            .wait(async {
+                tokio::select! {
+                    biased;
+                    _ = operation => panic!("operation completed before request admission"),
+                    request = receive_request(listener) => request,
+                }
+            })
+            .await
+    }
+    async fn respond(socket: &mut TcpStream, body: &Value) -> std::io::Result<()> {
+        let body = serde_json::to_vec(body).unwrap();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        socket.write_all(headers.as_bytes()).await?;
+        socket.write_all(&body).await?;
+        socket.flush().await
+    }
+
     fn status() -> Request {
         Request::Status {
             protocol_version: super::super::elastic::Version,
         }
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn upload_budget_overrides_client_default_without_extending_controls_or_refresh() {
-        let mut server = mockito::Server::new_async().await;
-        let delayed = server.mock("POST", "/account")
-            .with_body_from_request(|_| {
-                std::thread::sleep(Duration::from_millis(60));
-                json!({"status":"success","type":"usage_analytics_succeeded","usage_analytics":{"outcome":"accepted"}}).to_string().into_bytes()
-            }).expect(2).create_async().await;
+        let mut clock = ControlledClock::new();
+        let listener = clock.wait(TcpListener::bind("127.0.0.1:0")).await.unwrap();
         let mut client = V2Transport::at(
             crate::usage_backup::Auth {
                 access_token: "fixture-access".into(),
                 refresh_token: None,
             },
             Duration::from_millis(20),
-            format!("{}/account", server.url()),
+            format!("http://{}/account", listener.local_addr().unwrap()),
             false,
         )
         .unwrap()
         .with_upload_timeout(Duration::from_millis(200));
         let text = serde_json::to_string(&status()).unwrap();
-        assert_eq!(
-            client.upload_exact(&text).await.unwrap()["outcome"],
-            "accepted"
-        );
-        assert!(client.call(&status()).await.is_err());
-        delayed.assert_async().await;
-        delayed.remove_async().await;
-        let expired = server
-            .mock("POST", "/account")
-            .match_body(mockito::Matcher::PartialJson(
-                json!({"action":"usage_analytics"}),
-            ))
-            .with_body(json!({"type":"access_token_expired"}).to_string())
-            .expect(1)
-            .create_async()
-            .await;
-        let refresh = server
-            .mock("POST", "/account")
-            .match_body(mockito::Matcher::PartialJson(json!({"action":"status"})))
-            .with_body_from_request(|_| {
-                std::thread::sleep(Duration::from_millis(60));
-                json!({"status":"success","session":{"access_token":"new-token"}})
-                    .to_string()
-                    .into_bytes()
-            })
-            .expect(1)
-            .create_async()
-            .await;
+        let accepted = json!({"status":"success","type":"usage_analytics_succeeded","usage_analytics":{"outcome":"accepted"}});
+        let mut requests = Vec::new();
+        {
+            let started = Instant::now();
+            let upload = client.upload_exact(&text);
+            tokio::pin!(upload);
+            let (mut socket, request) = admit(&mut clock, &listener, upload.as_mut()).await;
+            requests.push(request);
+            assert_eq!(Instant::now(), started);
+            expect_pending(upload.as_mut(), "upload before delayed response").await;
+            clock.advance(60).await;
+            expect_pending(upload.as_mut(), "upload retains its 200 ms budget at 60 ms").await;
+            clock.wait(respond(&mut socket, &accepted)).await.unwrap();
+            assert_eq!(clock.wait(upload).await.unwrap()["outcome"], "accepted");
+            assert_eq!(Instant::now() - started, Duration::from_millis(60));
+        }
+        {
+            let started = Instant::now();
+            let request = status();
+            let control = client.call(&request);
+            tokio::pin!(control);
+            let (mut socket, request) = admit(&mut clock, &listener, control.as_mut()).await;
+            requests.push(request);
+            assert_eq!(Instant::now(), started);
+            clock.advance(19).await;
+            expect_pending(control.as_mut(), "control before 20 ms").await;
+            clock.advance(2).await;
+            assert!(expect_complete(control.as_mut(), "control 20 ms deadline")
+                .await
+                .is_err());
+            // Retain the connection until the same 60 ms response release. The
+            // deadline assertion above cannot pass because the fixture disconnected.
+            clock.advance(39).await;
+            let _ = clock.wait(respond(&mut socket, &accepted)).await;
+            assert_eq!(Instant::now() - started, Duration::from_millis(60));
+        }
         client.auth.refresh_token = Some("fixture-refresh".into());
-        let started = std::time::Instant::now();
-        assert!(client.upload_exact(&text).await.is_err());
-        assert!(started.elapsed() < Duration::from_millis(180));
+        {
+            let started = Instant::now();
+            let upload = client.upload_exact(&text);
+            tokio::pin!(upload);
+            let (mut socket, request) = admit(&mut clock, &listener, upload.as_mut()).await;
+            requests.push(request);
+            clock
+                .wait(respond(
+                    &mut socket,
+                    &json!({"type":"access_token_expired"}),
+                ))
+                .await
+                .unwrap();
+            drop(socket);
+            let (mut refresh_socket, request) = admit(&mut clock, &listener, upload.as_mut()).await;
+            requests.push(request);
+            assert_eq!(
+                Instant::now(),
+                started,
+                "expiry and refresh admission share one instant"
+            );
+            clock.advance(19).await;
+            expect_pending(upload.as_mut(), "refresh before 20 ms").await;
+            clock.advance(2).await;
+            assert!(expect_complete(upload.as_mut(), "refresh 20 ms deadline")
+                .await
+                .is_err());
+            assert!(Instant::now() - started < Duration::from_millis(180));
+            clock.advance(39).await;
+            let _ = clock
+                .wait(respond(
+                    &mut refresh_socket,
+                    &json!({"status":"success","session":{"access_token":"new-token"}}),
+                ))
+                .await;
+        }
         assert!(client.refreshed);
         assert_eq!(client.auth.access_token, "fixture-access");
-        expired.assert_async().await;
-        refresh.assert_async().await;
+        assert_eq!(requests.len(), 4);
+        for request in &requests[..3] {
+            assert_eq!(request["action"], "usage_analytics");
+            assert_eq!(request["credentials"]["access_token"], "fixture-access");
+        }
+        assert_eq!(requests[3]["action"], "status");
+        assert_eq!(
+            requests[3]["credentials"]["refresh_token"],
+            "fixture-refresh"
+        );
+        std::future::poll_fn(|cx| {
+            assert!(
+                listener.poll_accept(cx).is_pending(),
+                "unexpected upload replay"
+            );
+            Poll::Ready(())
+        })
+        .await;
+        clock.finish().await;
     }
     #[tokio::test]
     async fn response_duplicate_fields_size_and_unknown_fail_without_retry() {

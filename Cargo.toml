@@ -65,6 +65,7 @@ keyring = { version = "3.6.3", default-features = false, features = ["sync-secre
 [dev-dependencies]
 mockito = "1.7.0"
 time = { version = "0.3.41", default-features = false, features = ["formatting", "parsing", "std"] }
+tokio = { version = "1.44.1", features = ["test-util"] }
 
 [build-dependencies]
 serde = { version = "1.0.219", features = ["derive"] }
