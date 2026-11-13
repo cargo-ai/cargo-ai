@@ -698,6 +698,87 @@ fn project_data_assembly_excludes_mutable_files_and_preserves_rejected_outputs()
 #[test]
 fn writing_tool_keeps_sibling_children_across_interpreted_generated_and_installed_runs() {
     let fixture = Fixture::new("data-tool");
+    #[cfg(windows)]
+    let fixture = {
+        let mut fixture = fixture;
+        let compiler = fixture
+            .command("rustc", &fixture.root)
+            .arg("-vV")
+            .output()
+            .unwrap();
+        assert_success(&compiler, "native compiler identity");
+        let compiler = String::from_utf8(compiler.stdout).unwrap();
+        let release = compiler
+            .lines()
+            .find_map(|line| line.strip_prefix("release: "))
+            .unwrap();
+        let host = compiler
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .unwrap();
+        let modeled_library = |home: &std::path::Path, compact: bool, profile: &str| {
+            let mut path = home.join("templates");
+            if compact {
+                path = path
+                    .join("w")
+                    .join("0".repeat(64))
+                    .join(host)
+                    .join(if profile == "release" { "r" } else { "d" });
+            } else {
+                path = path
+                    .join("0".repeat(64))
+                    .join(format!("rustc-{release}"))
+                    .join(host)
+                    .join(profile);
+            }
+            path.join("target")
+                .join(if profile == "release" {
+                    "release"
+                } else {
+                    "debug"
+                })
+                .join("build/fallible-streaming-iterator")
+                .join("0".repeat(16))
+                .join("out")
+                .join(format!(
+                    "libfallible_streaming_iterator-{}.rlib",
+                    "0".repeat(16)
+                ))
+        };
+        let length = |path: &std::path::Path| path.to_string_lossy().encode_utf16().count();
+        let mut padding = 0;
+        loop {
+            fixture.cargo_ai_home = fixture.root.join(format!("h{}", "_".repeat(padding)));
+            if length(&fixture.cargo_ai_home) >= 31
+                && length(&modeled_library(&fixture.cargo_ai_home, false, "release")) >= 274
+                && length(&modeled_library(&fixture.cargo_ai_home, false, "dev")) >= 268
+            {
+                break;
+            }
+            padding += 1;
+        }
+        fs::create_dir_all(&fixture.cargo_ai_home).unwrap();
+        writeln!(
+            std::io::stderr(),
+            "Native cache fixture Home: {}\n{compiler}",
+            fixture.cargo_ai_home.display()
+        )
+        .expect("write native cache fixture diagnostic");
+        for profile in ["release", "dev"] {
+            let old = modeled_library(&fixture.cargo_ai_home, false, profile);
+            let new = modeled_library(&fixture.cargo_ai_home, true, profile);
+            writeln!(
+                std::io::stderr(),
+                "Modeled {profile} library path: old={} compact={}; compact path={}",
+                length(&old),
+                length(&new),
+                new.display()
+            )
+            .expect("write modeled native library path diagnostic");
+            assert!(length(&new) < length(&old));
+        }
+        fixture
+    };
     let project = fixture.root.join("project");
     assert_success(
         &data_cli(
@@ -855,6 +936,17 @@ pub(crate) fn invoke(_params: BTreeMap<String, Value>, context: InvocationContex
     );
     assert_success(&hatch, "hatch writing parent");
     assert!(output_text(&hatch).contains("Cargo profile  release"));
+    #[cfg(windows)]
+    {
+        let warm_release = data_cli(
+            &fixture,
+            &project,
+            &["hatch", "owned", "--config", "parent.json", "--force"],
+        );
+        assert_success(&warm_release, "warm release hatch at native cache depth");
+        assert!(output_text(&warm_release).contains("Reused warmed template"));
+        assert!(output_text(&warm_release).contains("Cargo profile  release"));
+    }
     let recheck = data_cli(
         &fixture,
         &project,
@@ -878,9 +970,10 @@ pub(crate) fn invoke(_params: BTreeMap<String, Value>, context: InvocationContex
     }
     assert_eq!(cache_roots.len(), 1);
     let cache = &cache_roots[0];
-    assert!(cache.join("dev").is_dir());
-    assert!(cache.join("release").is_dir());
-    let release_target = cache.join("release/target");
+    assert!(cache.join(if cfg!(windows) { "d" } else { "dev" }).is_dir());
+    let release_cache = cache.join(if cfg!(windows) { "r" } else { "release" });
+    assert!(release_cache.is_dir());
+    let release_target = release_cache.join("target");
     let binaries = [
         release_target.join("release"),
         release_target.join(&target).join("release"),
@@ -890,6 +983,15 @@ pub(crate) fn invoke(_params: BTreeMap<String, Value>, context: InvocationContex
     .filter(|path| path.is_file())
     .collect::<Vec<_>>();
     assert_eq!(binaries.len(), 1);
+    #[cfg(windows)]
+    writeln!(
+        std::io::stderr(),
+        "Actual native release cache: {}; exported artifact source: {} ({} UTF-16 units)",
+        release_cache.display(),
+        binaries[0].display(),
+        binaries[0].to_string_lossy().encode_utf16().count()
+    )
+    .expect("write actual native cache path diagnostic");
     assert_eq!(
         fs::read(&generated).unwrap(),
         fs::read(&binaries[0]).unwrap()
