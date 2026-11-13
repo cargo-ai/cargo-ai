@@ -470,7 +470,11 @@ fn interpreted_and_emitted_outputs_preserve_authority_and_reject_before_consumpt
         ])
         .env(
             "CARGO_TARGET_DIR",
-            emitted_target_dir(&fixture.cargo_ai_home.join("templates")),
+            if cfg!(windows) {
+                workspace.join("target")
+            } else {
+                emitted_target_dir(&fixture.cargo_ai_home.join("templates"))
+            },
         )
         .output()
         .expect("emitted workspace unit suite should start");
