@@ -137,6 +137,12 @@ fn open_at(dir: &Path, create: bool) -> Result<Option<Connection>, String> {
     let mut connection =
         Connection::open_with_flags(&path, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW)
             .map_err(db_error)?;
+    if !create {
+        // Changing temp_store discards temporary objects, including the legacy view.
+        connection
+            .pragma_update(None, "temp_store", "FILE")
+            .map_err(db_error)?;
+    }
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(db_error)?;

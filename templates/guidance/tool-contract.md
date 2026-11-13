@@ -197,6 +197,7 @@ When diagnosing managed-artifact issues:
 
 By default:
 - `cargo ai run`
+- `cargo ai build`
 - `cargo ai hatch --check`
 - `cargo ai hatch`
 
@@ -207,7 +208,7 @@ That means Cargo AI checks:
 - the tool contract can be loaded
 - the JSON step params match the declared tool params
 
-`--ignore-tools` only skips that upfront audit.
+`--ignore-tools` only skips that upfront audit. On `build` and `hatch`, select it explicitly for packaging when the target tool cannot execute on the build host. Structural definition validation and compilation remain required, and the command reports the audit as skipped. Successful opted-out builds write `tool_audit = "skipped"` in `cargo-ai-build.toml`; default builds omit the field. The option is not carried into generated agents or runtime settings. Runtime contract, parameter and access checks remain enabled. Native validation and later target execution tests are separate from successful cross-target packaging.
 
 It does not make a missing tool succeed. If execution reaches a tool step and the tool is still missing or incompatible, that step fails normally.
 

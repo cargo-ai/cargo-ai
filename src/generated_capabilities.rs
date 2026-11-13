@@ -7,6 +7,10 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
+#[cfg(cargo_ai_cli)]
+#[path = "commands/client_actions/measurement.rs"]
+pub(crate) mod measurement;
+
 #[path = "generated_capabilities/record.rs"]
 mod record;
 use record::{encoded_record, CLI_IDENTITY, CLOSE, IDENTITY, OPEN, RECORD_LEN, REVISION};
@@ -233,6 +237,10 @@ pub fn decode_record(record: &[u8]) -> Result<RuntimeCapabilities, CapabilityRea
 pub fn capabilities_for_artifact(
     artifact: &Path,
 ) -> Result<RuntimeCapabilities, CapabilityReadError> {
+    #[cfg(cargo_ai_cli)]
+    let _span = measurement::span(measurement::Stage::ChildCapabilityScan);
+    #[cfg(cargo_ai_cli)]
+    measurement::read_attempt();
     let metadata = std::fs::metadata(artifact)
         .map_err(|error| CapabilityReadError::Unreadable(error.kind()))?;
     if !metadata.is_file() {
@@ -243,11 +251,17 @@ pub fn capabilities_for_artifact(
     }
     let file =
         File::open(artifact).map_err(|error| CapabilityReadError::Unreadable(error.kind()))?;
+    #[cfg(cargo_ai_cli)]
+    measurement::file_opened();
     capabilities_from_reader(file, MAX_ARTIFACT_BYTES)
 }
 
 /// Passive bounded source identity lookup; never executes an artifact's inspect command.
 pub fn definition_for_artifact(artifact: &Path) -> Result<String, CapabilityReadError> {
+    #[cfg(cargo_ai_cli)]
+    let _span = measurement::span(measurement::Stage::ChildDefinitionScan);
+    #[cfg(cargo_ai_cli)]
+    measurement::read_attempt();
     let metadata =
         std::fs::metadata(artifact).map_err(|e| CapabilityReadError::Unreadable(e.kind()))?;
     if !metadata.is_file() {
@@ -257,6 +271,8 @@ pub fn definition_for_artifact(artifact: &Path) -> Result<String, CapabilityRead
         return Err(CapabilityReadError::Oversized);
     }
     let mut file = File::open(artifact).map_err(|e| CapabilityReadError::Unreadable(e.kind()))?;
+    #[cfg(cargo_ai_cli)]
+    measurement::file_opened();
     let mut window = Vec::new();
     let mut block = [0u8; READ_BLOCK_SIZE];
     let mut total = 0;
@@ -268,6 +284,8 @@ pub fn definition_for_artifact(artifact: &Path) -> Result<String, CapabilityRead
         if count == 0 {
             break;
         }
+        #[cfg(cargo_ai_cli)]
+        measurement::read_bytes(count);
         total += count as u64;
         if total > MAX_ARTIFACT_BYTES {
             return Err(CapabilityReadError::Oversized);
@@ -301,6 +319,59 @@ pub fn definition_for_artifact(artifact: &Path) -> Result<String, CapabilityRead
     found.ok_or(CapabilityReadError::Missing)
 }
 
+#[cfg(cargo_ai_cli)]
+pub(crate) struct ArtifactInspection {
+    pub(crate) capabilities: Result<RuntimeCapabilities, CapabilityReadError>,
+    pub(crate) definition: Result<String, CapabilityReadError>,
+}
+
+/// Inspect the same bounded bytes that the CLI will hash for its catalog binding.
+/// Each declaration retains its own first error, matching the standalone readers.
+#[cfg(cargo_ai_cli)]
+pub(crate) fn inspect_artifact_bytes(bytes: &[u8]) -> ArtifactInspection {
+    let _span = measurement::span(measurement::Stage::ChildArtifactScan);
+    measurement::check(measurement::Stage::ChildArtifactScan);
+    let mut capabilities = None;
+    let mut definition = None;
+    for (offset, &first) in bytes.iter().enumerate() {
+        if first == OPEN[0] && !matches!(capabilities, Some(Err(_))) {
+            let Some(frame) = bytes[offset..].get(..RECORD_LEN) else {
+                continue;
+            };
+            if frame.starts_with(&OPEN) && frame.ends_with(&CLOSE) {
+                capabilities = Some(if capabilities.is_some() {
+                    Err(CapabilityReadError::Conflicting)
+                } else {
+                    decode_record(frame)
+                });
+            }
+        } else if first == record::DEFINITION_OPEN[0] && !matches!(&definition, Some(Err(_))) {
+            let Some(frame) = bytes[offset..].get(..96) else {
+                continue;
+            };
+            if frame.starts_with(&record::DEFINITION_OPEN)
+                && frame.ends_with(&record::DEFINITION_CLOSE)
+            {
+                definition = Some(if definition.is_some() {
+                    Err(CapabilityReadError::Conflicting)
+                } else if !frame[16..80]
+                    .iter()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                {
+                    Err(CapabilityReadError::Malformed)
+                } else {
+                    String::from_utf8(frame[16..80].to_vec())
+                        .map_err(|_| CapabilityReadError::Malformed)
+                });
+            }
+        }
+    }
+    ArtifactInspection {
+        capabilities: capabilities.unwrap_or(Err(CapabilityReadError::Missing)),
+        definition: definition.unwrap_or(Err(CapabilityReadError::Missing)),
+    }
+}
+
 fn capabilities_from_reader(
     mut reader: impl Read,
     limit: u64,
@@ -322,6 +393,8 @@ fn capabilities_from_reader(
         if count == 0 {
             break;
         }
+        #[cfg(cargo_ai_cli)]
+        measurement::read_bytes(count);
         total += count as u64;
         if total > limit {
             return Err(CapabilityReadError::Oversized);
@@ -656,6 +729,91 @@ mod tests {
                     .supports_thinking()
             );
         }
+    }
+
+    #[cfg(cargo_ai_cli)]
+    #[test]
+    fn buffered_artifact_inspection_matches_standalone_readers() {
+        let path = std::env::temp_dir().join(format!(
+            "cargo-ai-buffered-inspection-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let compare = |bytes: &[u8]| {
+            std::fs::write(&path, bytes).unwrap();
+            let inspection = inspect_artifact_bytes(bytes);
+            assert_eq!(inspection.capabilities, capabilities_for_artifact(&path));
+            assert_eq!(inspection.definition, definition_for_artifact(&path));
+        };
+        let capability = encoded_record(false);
+        let definition = [
+            record::DEFINITION_OPEN.as_slice(),
+            "a".repeat(64).as_bytes(),
+            record::DEFINITION_CLOSE.as_slice(),
+        ]
+        .concat();
+        let mut malformed_capability = capability.clone();
+        malformed_capability[OPEN.len()] ^= 1;
+        let mut unsupported_capability = capability.clone();
+        unsupported_capability[OPEN.len() + IDENTITY.len()] = 255;
+        let mut malformed_definition = definition.clone();
+        malformed_definition[16] = b'A';
+        let mut different_definition = definition.clone();
+        different_definition[16..80].fill(b'b');
+
+        // A first malformed/unsupported frame wins over later complete frames;
+        // a valid first frame makes any later complete frame a conflict.
+        let capabilities = [
+            capability.clone(),
+            encoded_record(true),
+            test_record(4),
+            malformed_capability,
+            unsupported_capability,
+        ];
+        let definitions = [
+            definition.clone(),
+            malformed_definition,
+            different_definition,
+        ];
+        for first in &capabilities {
+            for second in &capabilities {
+                compare(&[first.as_slice(), definition.as_slice(), second.as_slice()].concat());
+            }
+            for identity in &definitions {
+                compare(&[first.as_slice(), identity.as_slice()].concat());
+                compare(&[identity.as_slice(), first.as_slice()].concat());
+            }
+        }
+        for first in &definitions {
+            for second in &definitions {
+                compare(&[first.as_slice(), capability.as_slice(), second.as_slice()].concat());
+            }
+        }
+        for length in 0..capability.len() {
+            compare(&[&capability[..length], definition.as_slice()].concat());
+        }
+        for length in 0..definition.len() {
+            compare(&[&definition[..length], capability.as_slice()].concat());
+        }
+        // Keep complete records at EOF, including every old reader block split.
+        for frame in [&capability, &definition] {
+            for split in 0..frame.len() {
+                let mut bytes = vec![42; READ_BLOCK_SIZE - split];
+                bytes.extend_from_slice(frame);
+                compare(&bytes);
+            }
+        }
+        compare(&[]);
+        compare(
+            &[
+                OPEN.as_slice(),
+                CLOSE.as_slice(),
+                record::DEFINITION_OPEN.as_slice(),
+                record::DEFINITION_CLOSE.as_slice(),
+            ]
+            .concat(),
+        );
+        compare(include_bytes!("generated_capabilities.rs"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

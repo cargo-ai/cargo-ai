@@ -127,6 +127,22 @@ impl CacheIdentity {
     }
 
     fn relative_path(&self) -> PathBuf {
+        self.relative_path_for(cfg!(windows))
+    }
+
+    fn relative_path_for(&self, windows: bool) -> PathBuf {
+        if windows {
+            let mut digest = Sha256::new();
+            digest.update(b"cargo-ai-windows-template-group-v1\0");
+            for value in [&self.binary, &self.rustc] {
+                digest.update((value.len() as u64).to_le_bytes());
+                digest.update(value.as_bytes());
+            }
+            return PathBuf::from("w")
+                .join(format!("{:x}", digest.finalize()))
+                .join(&self.target)
+                .join("r");
+        }
         PathBuf::from(&self.binary)
             .join(&self.rustc)
             .join(&self.target)
@@ -237,6 +253,38 @@ mod tests {
     use crate::Fixture;
 
     #[test]
+    fn compact_windows_seed_paths_preserve_each_identity_dimension() {
+        let identity = CacheIdentity {
+            binary: "a".repeat(64),
+            rustc: "rustc-1.100.0".into(),
+            target: "x86_64-pc-windows-msvc".into(),
+        };
+        let path = identity.relative_path_for(true);
+        let parts = path.iter().collect::<Vec<_>>();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "w");
+        assert_eq!(parts[1].len(), 64);
+        assert_eq!(parts[2], identity.target.as_str());
+        assert_eq!(parts[3], "r");
+        let mut changed = identity.clone();
+        changed.binary.replace_range(63.., "b");
+        assert_ne!(path, changed.relative_path_for(true));
+        changed = identity.clone();
+        changed.rustc.push_str("-other");
+        assert_ne!(path, changed.relative_path_for(true));
+        changed = identity.clone();
+        changed.target = "aarch64-pc-windows-msvc".into();
+        assert_ne!(path, changed.relative_path_for(true));
+        assert_eq!(
+            identity.relative_path_for(false),
+            PathBuf::from(&identity.binary)
+                .join(&identity.rustc)
+                .join(&identity.target)
+                .join("release")
+        );
+    }
+
+    #[test]
     fn streaming_inventory_checks_known_hashes_unicode_and_byte_changes() {
         let fixture = Fixture::new();
         let empty = fixture.home.join("empty");
@@ -302,13 +350,17 @@ mod tests {
             plain_metadata(&paths[0]).unwrap();
             paths[0].clone()
         };
-        let binary = only_dir(&home.join("templates"));
-        let rustc = only_dir(&binary);
-        let target = only_dir(&rustc);
-        let identity = CacheIdentity {
-            binary: binary.file_name().unwrap().to_str().unwrap().into(),
-            rustc: rustc.file_name().unwrap().to_str().unwrap().into(),
-            target: target.file_name().unwrap().to_str().unwrap().into(),
+        let identity = if cfg!(windows) {
+            CacheIdentity::current(Path::new(env!("CARGO_BIN_EXE_cargo-ai")))
+        } else {
+            let binary = only_dir(&home.join("templates"));
+            let rustc = only_dir(&binary);
+            let target = only_dir(&rustc);
+            CacheIdentity {
+                binary: binary.file_name().unwrap().to_str().unwrap().into(),
+                rustc: rustc.file_name().unwrap().to_str().unwrap().into(),
+                target: target.file_name().unwrap().to_str().unwrap().into(),
+            }
         };
         let started = std::time::Instant::now();
         let cache = SeedCache::capture(&home, identity.clone()).unwrap();

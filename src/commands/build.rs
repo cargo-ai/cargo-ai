@@ -103,6 +103,8 @@ struct BuildManifestDocument {
     profile: String,
     cargo_compile_profile: String,
     target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_audit: Option<&'static str>,
     agent_definitions: Vec<String>,
     hatched_agents: Vec<BuildManifestHatchedAgent>,
     tools: Vec<String>,
@@ -172,6 +174,7 @@ pub fn run(sub_m: &ArgMatches) -> bool {
         &build_target,
         &output_root,
         sub_m.get_flag("force"),
+        sub_m.get_flag("ignore_tools"),
     ) {
         Ok(manifest) => {
             println!("✓ Build assembled");
@@ -318,6 +321,7 @@ fn assemble_build_root(
     build_target: &crate::agent_builder::build_target::BuildTarget,
     output_root: &BuildOutputRoot,
     force: bool,
+    ignore_tools: bool,
 ) -> Result<BuildManifestDocument, String> {
     let build_profile = &loaded_metadata.build_profile;
     let agent_definitions = dedupe_preserve_order(&build_profile.agent_definitions);
@@ -368,6 +372,9 @@ fn assemble_build_root(
         build_target.cache_key_target(),
     );
     let target_platform = platform_label_for_target(build_target.cache_key_target());
+    if ignore_tools {
+        println!("Tool audit: skipped (--ignore-tools); runtime checks remain enabled.");
+    }
 
     for agent_path in dedupe_preserve_order(
         &agent_definitions
@@ -385,6 +392,7 @@ fn assemble_build_root(
             agent_path.as_str(),
             &tool_resolver,
             target_platform,
+            ignore_tools,
         )?;
     }
 
@@ -423,6 +431,7 @@ fn assemble_build_root(
         profile: profile_name.to_string(),
         cargo_compile_profile: CargoCompileProfile::Release.name().to_string(),
         target: build_target.cache_key_target().to_string(),
+        tool_audit: ignore_tools.then_some("skipped"),
         agent_definitions,
         hatched_agents: hatched_agents
             .iter()
@@ -725,6 +734,7 @@ fn audit_agent_definition(
     relative_path: &str,
     resolver: &crate::commands::tools::ToolResolver,
     target_platform: Option<&str>,
+    ignore_tools: bool,
 ) -> Result<(), String> {
     let source_path = resolve_agent_json_path(project_root, relative_path, "Agent")?;
     let definition = crate::runtime_definition::RuntimeAgentDefinition::load_from_path(
@@ -738,6 +748,9 @@ fn audit_agent_definition(
         )
     })?;
 
+    if ignore_tools {
+        return Ok(());
+    }
     crate::commands::tools::audit_actions_for_tools(
         &definition.actions(),
         resolver,
@@ -1301,14 +1314,23 @@ assets = ["assets/prompts/"]
         let target =
             crate::agent_builder::build_target::BuildTarget::from_cli(Some("aarch64-apple-darwin"))
                 .unwrap();
-        let error =
-            super::assemble_build_root(&root, "default", &metadata, &target, &output_root, true)
-                .unwrap_err();
-        assert!(error.contains("not explicitly selected"));
-        assert_eq!(
-            fs::read_to_string(output.join("preserved")).unwrap(),
-            "previous"
-        );
+        for ignore_tools in [false, true] {
+            let error = super::assemble_build_root(
+                &root,
+                "default",
+                &metadata,
+                &target,
+                &output_root,
+                true,
+                ignore_tools,
+            )
+            .unwrap_err();
+            assert!(error.contains("not explicitly selected"));
+            assert_eq!(
+                fs::read_to_string(output.join("preserved")).unwrap(),
+                "previous"
+            );
+        }
         let _ = fs::remove_dir_all(root);
     }
 

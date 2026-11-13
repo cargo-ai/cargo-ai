@@ -293,8 +293,7 @@ pub(super) fn execute(command: &str, args: &ArgMatches) -> Result<Option<Value>,
     if let Some(db) = db.as_ref() {
         // The first read below fixes one SQLite view for all source and temp
         // queries in this call. The read-only connection rolls back on drop.
-        db.execute_batch("PRAGMA temp_store=FILE; BEGIN DEFERRED;")
-            .map_err(db_error)?;
+        db.execute_batch("BEGIN DEFERRED;").map_err(db_error)?;
     }
     let mut cursor = read_cursor(command, args, db.as_ref(), &groups)?;
     let mut output = json!({
